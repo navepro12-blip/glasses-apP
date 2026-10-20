@@ -5,14 +5,18 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode
         run: |
           ls -d /Applications/Xcode*.app
-          XC=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          XC=$(ls -d /Applications/Xcode_2*.app | sort -V | tail -1)
           echo "Using $XC"
           sudo xcode-select -s "$XC"
           xcodebuild -version
@@ -32,5 +36,5 @@ jobs:
           ls -lh NaveGlasses.ipa
       - uses: actions/upload-artifact@v4
         with:
-          name: NaveGlasses-ipa
+          name: NaveGlasses-ipa-${{ matrix.os }}
           path: NaveGlasses.ipa
