@@ -38,6 +38,38 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+# ---- eSpeak (English parts) can't read its data from a non-ASCII folder ----
+# Nave's Windows user folder is Hebrew, so espeak-ng failed and killed the
+# server on English words. Copy its data to an ASCII path and point to it.
+def _fix_espeak_path():
+    try:
+        import shutil
+
+        import espeakng_loader
+
+        data = espeakng_loader.get_data_path()
+        lib = espeakng_loader.get_library_path()
+        if str(data).isascii() and str(lib).isascii():
+            return
+        root = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "NaveGlassesVoice", "espeak")
+        if not root.isascii():
+            root = r"C:\NaveGlassesVoice\espeak"
+        new_data = os.path.join(root, "espeak-ng-data")
+        new_lib = os.path.join(root, os.path.basename(str(lib)))
+        if not os.path.isdir(new_data):
+            shutil.copytree(data, new_data)
+        if not os.path.exists(new_lib):
+            shutil.copy2(lib, new_lib)
+        espeakng_loader.get_data_path = lambda: new_data
+        espeakng_loader.get_library_path = lambda: new_lib
+        os.environ["ESPEAK_DATA_PATH"] = new_data
+        print(f"[espeak] using {root}")
+    except Exception as e:
+        print(f"[espeak] path fix skipped: {e}")
+
+
+_fix_espeak_path()
+
 # ---- GPU (RTX) when available: ~10x faster than CPU for this model ----
 import onnxruntime as ort
 
