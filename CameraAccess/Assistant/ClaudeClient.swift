@@ -70,7 +70,8 @@ struct ClaudeClient {
     sentence where to allow it. \
     About this app (Nave Glasses, his own app): it streams the glasses camera to the phone, takes \
     photos and records video (auto-saved to his PC), can act as an OBS camera for lives, and lets him \
-    talk to you hands-free by saying "קלוד" or tapping the glasses touchpad. After you answer you \
+    talk to you hands-free by saying "קלוד" or tapping the glasses touchpad. After you answer there is \
+    a short follow-up window (a few seconds) where he can continue without the wake word; then you \
     stop listening until he says "קלוד" again.
     """
 

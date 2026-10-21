@@ -178,7 +178,7 @@ final class AssistantSettings {
   }
   /// After an answer, keep listening a few seconds for a follow-up (no wake word needed).
   var followUpEnabled: Bool {
-    get { defaults.object(forKey: "followUpEnabled") as? Bool ?? false }
+    get { defaults.object(forKey: "followUpEnabled") as? Bool ?? true }
     set { defaults.set(newValue, forKey: "followUpEnabled") }
   }
   /// Which microphone the listener uses (auto = glasses, iPhone after repeated failures).
