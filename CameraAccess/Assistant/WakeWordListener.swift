@@ -331,7 +331,7 @@ final class WakeWordListener {
     on node: AVAudioInputNode, format: AVAudioFormat, request: SFSpeechAudioBufferRecognitionRequest
   ) {
     nonisolated(unsafe) let req = request
-    nonisolated(unsafe) let converter = SpeechAudio.converter(from: format)
+    let converter = SpeechAudio.converter(from: format)
     node.removeTap(onBus: 0)
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
       if let converter, let out = SpeechAudio.convert(buffer, with: converter) {
