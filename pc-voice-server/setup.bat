@@ -31,8 +31,8 @@ uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onn
 copy /y "%~dp0server.py" server.py >nul
 copy /y "%~dp0start.bat" "%DEST%\start.bat" >nul
 
-echo Opening the Windows firewall for port 8765 ^(home network only^)...
-netsh advfirewall firewall add rule name="Nave Glasses Voice" dir=in action=allow protocol=TCP localport=8765 profile=private >nul 2>nul
+echo Opening the Windows firewall for port 8790 ^(home network only^)...
+netsh advfirewall firewall add rule name="Nave Glasses Voice" dir=in action=allow protocol=TCP localport=8790 profile=private >nul 2>nul
 
 echo.
 echo === Setup done. Starting the voice server... ===

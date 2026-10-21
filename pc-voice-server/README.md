@@ -4,7 +4,7 @@ Free, local Hebrew voice for the glasses app, using [BlueTTS](https://github.com
 
 1. Download this repo as ZIP (green **Code** button → **Download ZIP**) and extract it.
 2. Open `pc-voice-server` and **right-click `setup.bat` → Run as administrator** (one time).
-3. When it finishes it prints an address like `http://192.168.1.20:8765` — type it in the app:
+3. When it finishes it prints an address like `http://192.168.1.20:8790` — type it in the app:
    Settings → Voice provider → **PC (free)**.
 4. Next times: double-click `start.bat` in `%USERPROFILE%\NaveGlassesVoice`.
 

@@ -37,7 +37,7 @@ from blue_onnx import BlueTTS
 HERE = os.path.dirname(os.path.abspath(__file__))
 ONNX_DIR = os.path.join(HERE, "onnx_models")
 VOICES_DIR = os.path.join(HERE, "voices")
-PORT = int(os.environ.get("NAVE_VOICE_PORT", "8765"))
+PORT = int(os.environ.get("NAVE_VOICE_PORT", "8790"))
 
 app = FastAPI(title="Nave Glasses Voice")
 _lock = threading.Lock()

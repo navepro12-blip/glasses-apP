@@ -170,7 +170,7 @@ struct AssistantSettingsView: View {
           }
           switch provider {
           case .pc:
-            TextField("כתובת מהחלון במחשב, למשל http://192.168.1.20:8765", text: $pcURL)
+            TextField("כתובת מהחלון במחשב, למשל http://192.168.1.15:8790", text: $pcURL)
               .textInputAutocapitalization(.never).autocorrectionDisabled()
               .keyboardType(.URL)
             Picker("קול", selection: $pcVoice) {
