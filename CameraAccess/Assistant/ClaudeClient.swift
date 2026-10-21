@@ -52,7 +52,7 @@ struct ClaudeClient {
   let model: String
   var tools: ToolBox?
 
-  static let toolDefinitions: [[String: Any]] = [
+  static var toolDefinitions: [[String: Any]] { [
     ["type": "web_search_20250305", "name": "web_search", "max_uses": 3],
     [
       "name": "look_closer",
@@ -110,7 +110,7 @@ struct ClaudeClient {
         "required": ["action"],
       ],
     ],
-  ]
+  ] }
 
   @MainActor
   func ask(history: [ChatTurn], question: String, imageJPEG: Data?) async throws -> String {
