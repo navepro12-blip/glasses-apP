@@ -61,6 +61,8 @@ final class SpeechOutput: NSObject {
       switch s.voiceProvider {
       case .apple:
         audio = nil
+      case .pc:
+        audio = try await PCVoiceTTS.synthesize(text: text, baseURL: s.pcURL, voice: s.pcVoice)
       case .azure:
         audio = try await AzureTTS.synthesize(
           text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
@@ -190,6 +192,32 @@ enum AzureTTS {
 struct TTSFailure: LocalizedError {
   let message: String
   var errorDescription: String? { message }
+}
+
+/// Free local Hebrew voice (BlueTTS) running on Nave's PC — see pc-voice-server/.
+enum PCVoiceTTS {
+  static func synthesize(text: String, baseURL: String, voice: String) async throws -> Data {
+    var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !base.isEmpty else { throw TTSFailure(message: "חסרה כתובת המחשב") }
+    if !base.hasPrefix("http") { base = "http://" + base }
+    if base.hasSuffix("/") { base.removeLast() }
+    guard let url = URL(string: base + "/tts") else { throw TTSFailure(message: "כתובת מחשב לא תקינה") }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 12
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "voice": voice])
+    do {
+      let (data, response) = try await URLSession.shared.data(for: request)
+      let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+      guard code == 200, !data.isEmpty else { throw TTSFailure(message: "שרת הקול במחשב החזיר \(code)") }
+      return data
+    } catch let e as TTSFailure {
+      throw e
+    } catch {
+      throw TTSFailure(message: "אין חיבור לשרת הקול במחשב — הוא דלוק? אותה רשת Wi-Fi?")
+    }
+  }
 }
 
 /// ElevenLabs v3 — the most natural Hebrew of the cloud options (slower, paid

@@ -65,10 +65,11 @@ enum ClaudeModel: String, CaseIterable, Identifiable {
 }
 
 enum VoiceProvider: String, CaseIterable, Identifiable {
-  case apple, azure, eleven, gemini
+  case pc, apple, azure, eleven, gemini
   var id: String { rawValue }
   var label: String {
     switch self {
+    case .pc: return "המחשב שלי (חינם)"
     case .apple: return "אייפון (חינם)"
     case .azure: return "Azure"
     case .eleven: return "ElevenLabs"
@@ -112,6 +113,14 @@ final class AssistantSettings {
   var geminiVoice: String {
     get { defaults.string(forKey: "geminiVoice") ?? "Kore" }
     set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "geminiVoice") }
+  }
+  var pcURL: String {
+    get { defaults.string(forKey: "pcURL") ?? "" }
+    set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "pcURL") }
+  }
+  var pcVoice: String {
+    get { defaults.string(forKey: "pcVoice") ?? "noa" }
+    set { defaults.set(newValue, forKey: "pcVoice") }
   }
   var voiceProvider: VoiceProvider {
     get {

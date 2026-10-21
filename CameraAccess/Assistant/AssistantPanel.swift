@@ -120,6 +120,8 @@ struct AssistantSettingsView: View {
   @State private var geminiKey = AssistantSettings.shared.geminiKey
   @State private var geminiVoice = AssistantSettings.shared.geminiVoice
   @State private var voiceError: String?
+  @State private var pcURL = AssistantSettings.shared.pcURL
+  @State private var pcVoice = AssistantSettings.shared.pcVoice
   @State private var useCamera = AssistantSettings.shared.useCamera
   @State private var testing = false
 
@@ -152,6 +154,16 @@ struct AssistantSettingsView: View {
             ForEach(VoiceProvider.allCases) { Text($0.label).tag($0) }
           }
           switch provider {
+          case .pc:
+            TextField("כתובת מהחלון במחשב, למשל http://192.168.1.20:8765", text: $pcURL)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+              .keyboardType(.URL)
+            Picker("קול", selection: $pcVoice) {
+              Text("נועה").tag("noa")
+              Text("לילי").tag("lily")
+              Text("אדם").tag("adam")
+              Text("דניאל").tag("daniel")
+            }
           case .apple:
             Text("קול איכותי יותר: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית ← להוריד Enhanced.")
               .font(.footnote)
@@ -214,6 +226,8 @@ struct AssistantSettingsView: View {
     s.model = model
     s.hebrewVoice = voice
     s.voiceProvider = provider
+    s.pcURL = pcURL
+    s.pcVoice = pcVoice
     s.elevenKey = elevenKey
     s.elevenVoiceID = elevenVoiceID
     s.geminiKey = geminiKey
