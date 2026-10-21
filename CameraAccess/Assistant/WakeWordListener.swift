@@ -5,15 +5,19 @@
 // question: "קלוד, מה האבן הזאת?". Saying only the wake word opens a short
 // window for the question.
 //
-// Robustness notes (these were the crash sources):
+// Robustness notes (these were the crash / "deaf" sources):
 // - A fresh AVAudioEngine is created for every listening attempt. Reusing one
 //   engine across Bluetooth route changes (A2DP ↔ HFP, glasses on/off) leaves
 //   it with a stale hardware format, and installTap/start then raise an
 //   Objective-C exception that kills the app.
-// - The tap is always removed before a new one is installed (installing twice
-//   on the same bus is also a fatal exception).
-// - Every restart path goes through one serialised `beginRecognition()` with a
-//   generation counter, so late callbacks from an old task are ignored.
+// - Starting an engine on the HFP mic *itself* changes the route (output moves
+//   from A2DP to HFP). Restarting on every route change therefore looped once a
+//   second, tearing recognition down before any result arrived and lagging the
+//   whole app. Now a route change only restarts when the input port changed.
+// - Restarts are rate-limited (≥ 1 s apart) with exponential backoff when the
+//   recogniser keeps failing early, and everything is logged to DiagLog.
+// - HFP audio is 8/16 kHz; buffers are converted to 16 kHz mono before they go
+//   to the recogniser.
 //
 
 @preconcurrency import AVFoundation
@@ -48,7 +52,13 @@ final class WakeWordListener {
   private var silenceTask: Task<Void, Never>?
   private var recycleTask: Task<Void, Never>?
   private var restartTask: Task<Void, Never>?
-  private var consecutiveFailures = 0
+  private var lastBegin = Date.distantPast
+  private var partialCount = 0
+  /// Recogniser sessions that ended with no result shortly after starting.
+  private var earlyFailures = 0
+  private var inputUID = ""
+  /// Set after repeated failures on the glasses mic: use the iPhone mic instead.
+  private(set) var fellBackToPhoneMic = false
 
   func start(language: ListenLanguage) async throws {
     guard !isRunning else { return }
@@ -64,11 +74,13 @@ final class WakeWordListener {
     }
     AudioRoute.assistantListening = true
     observeAudioChanges()
-    consecutiveFailures = 0
+    earlyFailures = 0
+    DiagLog.log("wake: start lang=\(language.rawValue)")
     try beginRecognition()
   }
 
   func stop() {
+    if isRunning { DiagLog.log("wake: stop") }
     isRunning = false
     AudioRoute.assistantListening = false
     observers.forEach { NotificationCenter.default.removeObserver($0) }
@@ -84,29 +96,65 @@ final class WakeWordListener {
 
   // MARK: - Audio route / engine changes
 
-  /// Starting the glasses stream, Bluetooth route changes and the end of a
-  /// recording all stop AVAudioEngine silently — restart listening then.
   private func observeAudioChanges() {
     guard observers.isEmpty else { return }
     let nc = NotificationCenter.default
-    let restart: @Sendable (Notification) -> Void = { [weak self] _ in
-      Task { @MainActor in self?.scheduleRestart(after: .milliseconds(700), reason: "מתחבר מחדש למיקרופון…") }
+
+    // Route change: only matters when the *input* port changed (e.g. glasses
+    // disconnected). Our own engine start flips the output to HFP, which must
+    // not trigger a restart.
+    observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { [weak self] note in
+      let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+      let newInput = AVAudioSession.sharedInstance().currentRoute.inputs.first?.uid ?? ""
+      Task { @MainActor in
+        guard let self, self.isRunning else { return }
+        let engineAlive = self.engine?.isRunning ?? false
+        if newInput != self.inputUID || !engineAlive {
+          DiagLog.log("wake: input changed (reason \(reason)) '\(self.inputUID)' → '\(newInput)' engineRunning=\(engineAlive)")
+          self.scheduleRestart(after: .milliseconds(800), reason: "המיקרופון השתנה — מתחבר מחדש…")
+        }
+      }
+    })
+
+    // The system stopped *our* engine (format/route reconfiguration).
+    observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { [weak self] note in
+      let changedID = ObjectIdentifier(note.object as AnyObject)
+      Task { @MainActor in
+        guard let self, self.isRunning, let engine = self.engine, ObjectIdentifier(engine) == changedID else { return }
+        DiagLog.log("wake: our engine was reconfigured by the system")
+        self.scheduleRestart(after: .milliseconds(800), reason: "מתחבר מחדש למיקרופון…")
+      }
+    })
+
+    // Interruption ended (phone call, Siri…) → resume.
+    observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] note in
+      let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+      Task { @MainActor in
+        guard let self, self.isRunning else { return }
+        if type == AVAudioSession.InterruptionType.ended.rawValue {
+          self.scheduleRestart(after: .milliseconds(600), reason: "ממשיך להקשיב…")
+        } else {
+          self.onStatus?("הופסק זמנית (שיחה/סירי)")
+        }
+      }
+    })
+
+    let plainRestart: @Sendable (Notification) -> Void = { [weak self] _ in
+      Task { @MainActor in self?.scheduleRestart(after: .milliseconds(800), reason: "מתחבר מחדש למיקרופון…") }
     }
-    // object: nil — the engine instance changes on every restart.
-    observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: .glassesAudioSessionReleased, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil, using: plainRestart))
+    observers.append(nc.addObserver(forName: .glassesAudioSessionReleased, object: nil, queue: nil, using: plainRestart))
   }
 
-  /// Coalesces restart requests: many notifications arrive in a burst when
-  /// Bluetooth switches profiles, and only the last one matters.
+  /// Coalesces restart requests and keeps them ≥ 1 s apart.
   private func scheduleRestart(after delay: Duration, reason: String?) {
     guard isRunning, !armed else { return }
     restartTask?.cancel()
+    let sinceLast = Date().timeIntervalSince(lastBegin)
+    let minGap: Duration = .milliseconds(Int(max(0, 1.0 - sinceLast) * 1000))
+    let wait = delay > minGap ? delay : minGap
     restartTask = Task { [weak self] in
-      try? await Task.sleep(for: delay)
+      try? await Task.sleep(for: wait)
       guard let self, !Task.isCancelled, self.isRunning, !self.armed else { return }
       if let reason { self.onStatus?(reason) }
       self.beginRecognitionSafely()
@@ -116,15 +164,16 @@ final class WakeWordListener {
   private func beginRecognitionSafely() {
     do {
       try beginRecognition()
-      consecutiveFailures = 0
     } catch {
-      consecutiveFailures += 1
-      onStatus?("המיקרופון לא זמין (\(error.localizedDescription)) — מנסה שוב")
-      // Back off so a dead route doesn't turn into a tight restart loop.
-      let seconds = min(10, 1 << min(consecutiveFailures, 3))
-      scheduleRestart(after: .seconds(seconds), reason: nil)
+      earlyFailures += 1
+      DiagLog.log("wake: begin failed (\(earlyFailures)): \(error.localizedDescription)")
+      onStatus?("המיקרופון לא זמין — מנסה שוב")
+      scheduleRestart(after: .seconds(backoffSeconds), reason: nil)
     }
   }
+
+  /// 2, 4, 8, 16, 30 s…
+  private var backoffSeconds: Int { min(30, 1 << min(earlyFailures, 5)) }
 
   // MARK: - Recognition
 
@@ -133,13 +182,22 @@ final class WakeWordListener {
     guard isRunning else { return }
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language.rawValue)),
       recognizer.isAvailable
-    else { throw SpeechInput.InputError.unavailable }
+    else {
+      DiagLog.log("wake: recognizer unavailable for \(language.rawValue)")
+      throw SpeechInput.InputError.unavailable
+    }
 
     armed = false
     command = ""
+    partialCount = 0
     generation += 1
     let gen = generation
-    AudioRoute.activateForListening()
+    lastBegin = Date()
+
+    // After repeated failures on the glasses mic, fall back to the iPhone mic.
+    let preferPhone = AssistantSettings.shared.micSource == .phone
+      || (AssistantSettings.shared.micSource == .auto && fellBackToPhoneMic)
+    AudioRoute.activateForListening(preferPhoneMic: preferPhone)
 
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
@@ -155,6 +213,7 @@ final class WakeWordListener {
     // then crashes the app. Retry shortly instead.
     guard format.sampleRate > 0, format.channelCount > 0 else {
       request = nil
+      DiagLog.log("wake: input format 0 Hz, retrying")
       onStatus?("ממתין למיקרופון…")
       scheduleRestart(after: .milliseconds(900), reason: nil)
       return
@@ -170,14 +229,28 @@ final class WakeWordListener {
       request = nil
       throw error
     }
-    let route = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? "?"
-    onStatus?("👂 מקשיב דרך: \(route)")
+    let port = AVAudioSession.sharedInstance().currentRoute.inputs.first
+    inputUID = port?.uid ?? ""
+    let route = port?.portName ?? "?"
+    DiagLog.log("wake: engine started gen=\(gen) fmt=\(Int(format.sampleRate))Hz/\(format.channelCount)ch route=\(route) \(DiagLog.sessionLine())")
+    onStatus?("👂 מקשיב דרך: \(route)\(fellBackToPhoneMic ? " (אייפון)" : "")")
 
-    task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, ended in
+    let started = Date()
+    task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, ended, errorText in
       Task { @MainActor in
         guard let self, self.generation == gen, self.isRunning else { return }
-        if !text.isEmpty { self.handle(text) }
-        if ended { self.scheduleRestart(after: .milliseconds(250), reason: nil) }
+        if !text.isEmpty {
+          self.partialCount += 1
+          if self.partialCount == 1 {
+            DiagLog.log("wake: first partial after \(Int(Date().timeIntervalSince(started) * 1000)) ms: \(text.prefix(40))")
+          }
+          self.handle(text)
+        }
+        if ended {
+          let life = Date().timeIntervalSince(started)
+          DiagLog.log("wake: task ended after \(Int(life)) s, partials=\(self.partialCount)\(errorText.map { " error=\($0)" } ?? "")")
+          self.taskEnded(lifetime: life)
+        }
       }
     }
 
@@ -185,9 +258,31 @@ final class WakeWordListener {
     // while idle so listening never silently stops.
     recycleTask?.cancel()
     recycleTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(45))
+      try? await Task.sleep(for: .seconds(50))
       guard let self, !Task.isCancelled, self.isRunning, !self.armed, self.generation == gen else { return }
+      DiagLog.log("wake: recycling session")
       self.beginRecognitionSafely()
+    }
+  }
+
+  private func taskEnded(lifetime: TimeInterval) {
+    guard isRunning, !armed else { return }
+    if partialCount == 0, lifetime < 8 {
+      earlyFailures += 1
+      let onGlasses = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portType == .bluetoothHFP
+      if earlyFailures >= 3, onGlasses, !fellBackToPhoneMic, AssistantSettings.shared.micSource == .auto {
+        fellBackToPhoneMic = true
+        earlyFailures = 0
+        DiagLog.log("wake: glasses mic gave nothing 3× — falling back to the iPhone mic")
+        onStatus?("המיקרופון של המשקפיים לא מגיב — עובר למיקרופון של האייפון")
+        scheduleRestart(after: .seconds(1), reason: nil)
+        return
+      }
+      onStatus?("זיהוי הדיבור נכשל (\(earlyFailures)) — מנסה שוב בעוד \(backoffSeconds) שניות")
+      scheduleRestart(after: .seconds(backoffSeconds), reason: nil)
+    } else {
+      earlyFailures = 0
+      scheduleRestart(after: .milliseconds(300), reason: nil)
     }
   }
 
@@ -196,7 +291,10 @@ final class WakeWordListener {
     // Don't wake on our own voice (answers / live chat read aloud).
     if !armed, SpeechOutput.shared.isBusy { return }
     guard let tail = WakeWord.commandAfterWakeWord(in: text) else { return }
-    if !armed { onWake?() }
+    if !armed {
+      DiagLog.log("wake: WAKE WORD in '\(text.suffix(40))'")
+      onWake?()
+    }
     armed = true
     command = tail
     onPartial?(command)
@@ -209,6 +307,7 @@ final class WakeWordListener {
       try? await Task.sleep(for: wait)
       guard let self, !Task.isCancelled, self.isRunning, self.armed else { return }
       let heard = self.command
+      DiagLog.log("wake: command '\(heard)'")
       self.stop()
       if heard.isEmpty { self.onWakeOnly?() } else { self.onCommand?(heard) }
     }
@@ -232,23 +331,62 @@ final class WakeWordListener {
     on node: AVAudioInputNode, format: AVAudioFormat, request: SFSpeechAudioBufferRecognitionRequest
   ) {
     nonisolated(unsafe) let req = request
+    nonisolated(unsafe) let converter = SpeechAudio.converter(from: format)
     node.removeTap(onBus: 0)
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-      req.append(buffer)
+      if let converter, let out = SpeechAudio.convert(buffer, with: converter) {
+        req.append(out)
+      } else {
+        req.append(buffer)
+      }
     }
   }
 
   nonisolated private static func makeTask(
     recognizer: SFSpeechRecognizer, request: SFSpeechAudioBufferRecognitionRequest,
-    onResult: @escaping @Sendable (String, Bool) -> Void
+    onResult: @escaping @Sendable (String, Bool, String?) -> Void
   ) -> SFSpeechRecognitionTask {
     recognizer.recognitionTask(with: request) { result, error in
       if let result {
-        onResult(result.bestTranscription.formattedString, result.isFinal)
-      } else if error != nil {
-        onResult("", true)
+        onResult(result.bestTranscription.formattedString, result.isFinal, nil)
+      } else if let error {
+        let ns = error as NSError
+        onResult("", true, "\(ns.domain)#\(ns.code) \(ns.localizedDescription)")
       }
     }
+  }
+}
+
+/// Converts the hardware input (HFP is 8 or 16 kHz, sometimes stereo on the
+/// phone) to 16 kHz mono Float32 — the format the recogniser is happiest with.
+enum SpeechAudio {
+  nonisolated static func targetFormat() -> AVAudioFormat {
+    AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+  }
+
+  nonisolated static func converter(from format: AVAudioFormat) -> AVAudioConverter? {
+    if format.sampleRate == 16000, format.channelCount == 1 { return nil }
+    return AVAudioConverter(from: format, to: targetFormat())
+  }
+
+  nonisolated static func convert(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter) -> AVAudioPCMBuffer? {
+    let target = converter.outputFormat
+    let ratio = target.sampleRate / buffer.format.sampleRate
+    let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 64
+    guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+    var consumed = false
+    var error: NSError?
+    let status = converter.convert(to: out, error: &error) { _, outStatus in
+      if consumed {
+        outStatus.pointee = .noDataNow
+        return nil
+      }
+      consumed = true
+      outStatus.pointee = .haveData
+      return buffer
+    }
+    guard status != .error, out.frameLength > 0 else { return nil }
+    return out
   }
 }
 

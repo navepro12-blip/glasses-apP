@@ -46,6 +46,7 @@
 		D9AE0E9207E8EA21BCC8BC87 /* AssistantPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF74F2FD771D857AF6E781 /* AssistantPanel.swift */; };
 		D5CF56D8C7C2268A3411EDF7 /* WakeWordListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC74E6E00C6B029B4EEBD505 /* WakeWordListener.swift */; };
 		123EB99F6911A2397CF29459 /* PCBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8F45286C3569407262FE27 /* PCBridge.swift */; };
+		EBA61082288B35ECFEE538AF /* Diagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE38C49391AD1792E5AFF5A5 /* Diagnostics.swift */; };
 		5000C14CD7EABCF21FA3A1D6 /* DailyTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8F0F13795129C4A7CE94440 /* DailyTools.swift */; };
 		8BC3C066441AFE5F46C385EB /* VisualMemory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E96E21507A8C0B337046AF2 /* VisualMemory.swift */; };
 		AED762F4B5542A9C62BD92DE /* LocationContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEA8D90E762DDA9956E651F4 /* LocationContext.swift */; };
@@ -123,6 +124,7 @@
 		B1FF74F2FD771D857AF6E781 /* AssistantPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantPanel.swift; sourceTree = "<group>"; };
 		FC74E6E00C6B029B4EEBD505 /* WakeWordListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeWordListener.swift; sourceTree = "<group>"; };
 		4A8F45286C3569407262FE27 /* PCBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCBridge.swift; sourceTree = "<group>"; };
+		BE38C49391AD1792E5AFF5A5 /* Diagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics.swift; sourceTree = "<group>"; };
 		B8F0F13795129C4A7CE94440 /* DailyTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyTools.swift; sourceTree = "<group>"; };
 		3E96E21507A8C0B337046AF2 /* VisualMemory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualMemory.swift; sourceTree = "<group>"; };
 		CEA8D90E762DDA9956E651F4 /* LocationContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationContext.swift; sourceTree = "<group>"; };
@@ -289,6 +291,7 @@
 				193FC94A4A7822206C659FE8 /* ToolBox.swift */,
 				4A8F45286C3569407262FE27 /* PCBridge.swift */,
 				FC74E6E00C6B029B4EEBD505 /* WakeWordListener.swift */,
+				BE38C49391AD1792E5AFF5A5 /* Diagnostics.swift */,
 				B8F0F13795129C4A7CE94440 /* DailyTools.swift */,
 				3E96E21507A8C0B337046AF2 /* VisualMemory.swift */,
 				CEA8D90E762DDA9956E651F4 /* LocationContext.swift */,
@@ -459,6 +462,7 @@
 				FFDF9D0A9ABDDAD3A18B5FDE /* ToolBox.swift in Sources */,
 				123EB99F6911A2397CF29459 /* PCBridge.swift in Sources */,
 				D5CF56D8C7C2268A3411EDF7 /* WakeWordListener.swift in Sources */,
+				EBA61082288B35ECFEE538AF /* Diagnostics.swift in Sources */,
 				5000C14CD7EABCF21FA3A1D6 /* DailyTools.swift in Sources */,
 				8BC3C066441AFE5F46C385EB /* VisualMemory.swift in Sources */,
 				AED762F4B5542A9C62BD92DE /* LocationContext.swift in Sources */,

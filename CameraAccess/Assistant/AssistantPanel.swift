@@ -174,6 +174,7 @@ struct AssistantSettingsView: View {
   @State private var autoUpload = AssistantSettings.shared.autoUpload
   @State private var followUp = AssistantSettings.shared.followUpEnabled
   @State private var location = AssistantSettings.shared.locationEnabled
+  @State private var micSource = AssistantSettings.shared.micSource
 
   var body: some View {
     NavigationStack {
@@ -209,11 +210,25 @@ struct AssistantSettingsView: View {
           Text("ב-OBS: Browser Source עם הכתובת http://localhost:8790/cam. כפתור הבועות במסך הראשי מפעיל הקראת צ'אט.")
         }
 
-        Section("שפת דיבור") {
+        Section {
           Picker("אני מדבר ב", selection: $language) {
             ForEach(ListenLanguage.allCases) { Text($0.label).tag($0) }
           }
           .pickerStyle(.segmented)
+          Picker("מיקרופון", selection: $micSource) {
+            ForEach(MicSource.allCases) { Text($0.label).tag($0) }
+          }
+          .pickerStyle(.segmented)
+        } header: {
+          Text("שפת דיבור ומיקרופון")
+        } footer: {
+          Text("אוטומטי: מיקרופון המשקפיים, ועובר לאייפון אם המשקפיים לא מחזירים דיבור.")
+        }
+
+        Section("אבחון") {
+          NavigationLink("יומן אבחון (לשליחה לקלוד)") { DiagnosticsView() }
+          Text(DiagLog.sessionLine()).font(.system(size: 10, design: .monospaced))
+            .environment(\.layoutDirection, .leftToRight)
         }
 
         Section {
@@ -250,17 +265,20 @@ struct AssistantSettingsView: View {
             TextField("שם קול (Kore, Puck, Zephyr…)", text: $geminiVoice)
               .textInputAutocapitalization(.never).autocorrectionDisabled()
           }
-          Button(testing ? "משמיע…" : "בדיקת קול") {
+          Button(testing ? "משמיע… (רגע)" : "בדיקת קול") {
+            guard !testing else { return }
             save()
             testing = true
             voiceError = nil
-            SpeechOutput.shared.enqueue("היי נווה, ככה אני נשמע במשקפיים. בוא נבדוק אבן חדשה.")
+            SpeechOutput.shared.stopAll()
+            SpeechOutput.shared.enqueue("היי נווה, ככה אני נשמע במשקפיים.")
             Task {
-              try? await Task.sleep(for: .seconds(6))
+              await SpeechOutput.shared.waitUntilIdle(maxSeconds: 30)
               voiceError = SpeechOutput.shared.lastVoiceError
               testing = false
             }
           }
+          .disabled(testing)
           if let voiceError {
             Text("⚠️ \(voiceError) — הושמע קול האייפון במקום").font(.footnote).foregroundStyle(.orange)
           }
@@ -305,6 +323,7 @@ struct AssistantSettingsView: View {
     s.autoUpload = autoUpload
     s.followUpEnabled = followUp
     s.locationEnabled = location
+    s.micSource = micSource
   }
 }
 

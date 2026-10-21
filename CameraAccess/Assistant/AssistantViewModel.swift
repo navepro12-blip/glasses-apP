@@ -85,6 +85,8 @@ final class AssistantViewModel {
       MainActor.assumeIsolated { self?.resumeWakeListening() }
     })
 
+    DiagLog.observeAudioSession()
+    DiagLog.log("app: assistant attached, v\(AppVersion.text) \(DiagLog.sessionLine())")
     LocationContext.shared.start()
     resumeWakeListening()
   }

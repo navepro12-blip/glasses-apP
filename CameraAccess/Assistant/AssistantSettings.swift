@@ -78,6 +78,18 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
   }
 }
 
+enum MicSource: String, CaseIterable, Identifiable {
+  case auto, glasses, phone
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .auto: return "אוטומטי"
+    case .glasses: return "משקפיים"
+    case .phone: return "אייפון"
+    }
+  }
+}
+
 enum HebrewVoice: String, CaseIterable, Identifiable {
   case hila = "he-IL-HilaNeural"
   case avri = "he-IL-AvriNeural"
@@ -168,6 +180,11 @@ final class AssistantSettings {
   var followUpEnabled: Bool {
     get { defaults.object(forKey: "followUpEnabled") as? Bool ?? true }
     set { defaults.set(newValue, forKey: "followUpEnabled") }
+  }
+  /// Which microphone the listener uses (auto = glasses, iPhone after repeated failures).
+  var micSource: MicSource {
+    get { MicSource(rawValue: defaults.string(forKey: "micSource") ?? "") ?? .auto }
+    set { defaults.set(newValue.rawValue, forKey: "micSource") }
   }
   /// Share a coarse location with Claude (weather, nearby, where I parked).
   var locationEnabled: Bool {

@@ -56,7 +56,7 @@ final class SpeechInput {
 
     transcript = ""
     lastChange = Date()
-    AudioRoute.activateForListening()
+    AudioRoute.activateForListening(preferPhoneMic: AssistantSettings.shared.micSource == .phone)
 
     let newEngine = AVAudioEngine()
     let input = newEngine.inputNode
@@ -79,6 +79,7 @@ final class SpeechInput {
       throw error
     }
     isListening = true
+    DiagLog.log("ptt: engine started fmt=\(Int(format.sampleRate))Hz \(DiagLog.sessionLine())")
 
     task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, isFinal in
       Task { @MainActor in
@@ -138,9 +139,14 @@ final class SpeechInput {
     on node: AVAudioInputNode, format: AVAudioFormat, request: SFSpeechAudioBufferRecognitionRequest
   ) {
     nonisolated(unsafe) let req = request
+    nonisolated(unsafe) let converter = SpeechAudio.converter(from: format)
     node.removeTap(onBus: 0)
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-      req.append(buffer)
+      if let converter, let out = SpeechAudio.convert(buffer, with: converter) {
+        req.append(out)
+      } else {
+        req.append(buffer)
+      }
     }
   }
 
@@ -148,9 +154,12 @@ final class SpeechInput {
     recognizer: SFSpeechRecognizer, request: SFSpeechAudioBufferRecognitionRequest,
     onResult: @escaping @Sendable (String, Bool) -> Void
   ) -> SFSpeechRecognitionTask {
-    recognizer.recognitionTask(with: request) { result, _ in
+    recognizer.recognitionTask(with: request) { result, error in
       if let result {
         onResult(result.bestTranscription.formattedString, result.isFinal)
+      } else if let error {
+        let ns = error as NSError
+        DiagLog.log("ptt: task error \(ns.domain)#\(ns.code) \(ns.localizedDescription)")
       }
     }
   }

@@ -85,6 +85,9 @@ final class SpeechOutput: NSObject {
 
   private func speakOne(_ text: String) async {
     let s = AssistantSettings.shared
+    let t0 = Date()
+    func ms() -> Int { Int(Date().timeIntervalSince(t0) * 1000) }
+    DiagLog.log("tts: \(s.voiceProvider.rawValue) request \(text.count) chars")
     do {
       let audio: Data?
       switch s.voiceProvider {
@@ -102,17 +105,25 @@ final class SpeechOutput: NSObject {
       }
       if let audio {
         lastVoiceError = nil
+        DiagLog.log("tts: audio ready after \(ms()) ms (\(audio.count) bytes) — playing")
         await play(audio)
+        DiagLog.log("tts: playback done at \(ms()) ms")
         return
       }
     } catch {
       lastVoiceError = error.localizedDescription
+      DiagLog.log("tts: \(s.voiceProvider.rawValue) failed after \(ms()) ms: \(error.localizedDescription)")
     }
+    DiagLog.log("tts: apple voice start at \(ms()) ms")
     await speakWithApple(text)
+    DiagLog.log("tts: apple voice done at \(ms()) ms")
   }
 
   private func play(_ data: Data) async {
-    guard let p = try? AVAudioPlayer(data: data) else { return }
+    guard let p = try? AVAudioPlayer(data: data) else {
+      DiagLog.log("tts: AVAudioPlayer could not decode the audio")
+      return
+    }
     player = p
     p.delegate = self
     let seconds = max(5, p.duration + 4)
@@ -233,7 +244,8 @@ enum PCVoiceTTS {
     guard let url = URL(string: base + "/tts") else { throw TTSFailure(message: "כתובת מחשב לא תקינה") }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
-    request.timeoutInterval = 12
+    // BlueTTS on the PC's CPU takes ~3–4 s per sentence; GPU is faster.
+    request.timeoutInterval = 20
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "voice": voice])
     do {
@@ -347,26 +359,46 @@ enum AudioRoute {
   }
 
   static func activateForPlayback() {
-    configure()
+    configure(preferPhoneMic: nil)
   }
 
-  static func activateForListening() {
-    configure()
+  static func activateForListening(preferPhoneMic: Bool = false) {
+    configure(preferPhoneMic: preferPhoneMic)
   }
 
   private static let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
 
+  nonisolated(unsafe) private static var lastActivation = Date.distantPast
+
   /// Sets the category only when it actually differs — every setCategory call
-  /// restarts running audio engines, which cost us the listener each time.
-  private static func configure() {
+  /// restarts running audio engines, which cost us the listener each time —
+  /// and re-activates at most every few seconds.
+  private static func configure(preferPhoneMic: Bool?) {
     let session = AVAudioSession.sharedInstance()
     do {
       if session.category != .playAndRecord || session.mode != .default || session.categoryOptions != options {
+        DiagLog.log("audio: setCategory playAndRecord (was \(session.category.rawValue)/\(session.mode.rawValue))")
         try session.setCategory(.playAndRecord, mode: .default, options: options)
+        lastActivation = .distantPast
       }
-      try session.setActive(true)
+      if let preferPhoneMic {
+        let inputs = session.availableInputs ?? []
+        let wantedType: AVAudioSession.Port = preferPhoneMic ? .builtInMic : .bluetoothHFP
+        let wanted = inputs.first(where: { $0.portType == wantedType })
+        let current = session.preferredInput?.uid
+        if let wanted, current != wanted.uid {
+          DiagLog.log("audio: preferred input → \(wanted.portName)")
+          try session.setPreferredInput(wanted)
+        } else if wanted == nil, !preferPhoneMic, current != nil {
+          try session.setPreferredInput(nil)
+        }
+      }
+      if Date().timeIntervalSince(lastActivation) > 5 {
+        try session.setActive(true)
+        lastActivation = Date()
+      }
     } catch {
-      NSLog("[NaveGlasses] audio session error: \(error)")
+      DiagLog.log("audio: session error \(error.localizedDescription)")
     }
   }
 }
