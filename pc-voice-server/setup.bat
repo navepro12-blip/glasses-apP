@@ -1,5 +1,7 @@
 @echo off
 chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 title Nave Glasses Voice - setup
 echo === Nave Glasses Voice: one-time setup ===
 set "DEST=%USERPROFILE%\NaveGlassesVoice"
