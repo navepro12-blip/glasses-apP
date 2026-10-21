@@ -295,13 +295,32 @@ struct TTSFailure: LocalizedError {
 }
 
 /// Free local Hebrew voice (BlueTTS) running on Nave's PC — see pc-voice-server/.
+@MainActor
 enum PCVoiceTTS {
+  /// When the PC isn't reachable (away from home Wi-Fi), skip it for a minute
+  /// instead of waiting on every sentence.
+  private static var downUntil = Date.distantPast
+  private static var lastOK = Date.distantPast
+
   static func synthesize(text: String, baseURL: String, voice: String) async throws -> Data {
+    guard Date() >= downUntil else { throw TTSFailure(message: "המחשב לא זמין כרגע — קול גיבוי") }
     var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !base.isEmpty else { throw TTSFailure(message: "חסרה כתובת המחשב") }
     if !base.hasPrefix("http") { base = "http://" + base }
     if base.hasSuffix("/") { base.removeLast() }
     guard let url = URL(string: base + "/tts") else { throw TTSFailure(message: "כתובת מחשב לא תקינה") }
+    // Quick reachability probe if we haven't heard from the PC lately.
+    if Date().timeIntervalSince(lastOK) > 60, let health = URL(string: base + "/health") {
+      var probe = URLRequest(url: health)
+      probe.timeoutInterval = 1.5
+      let ok = ((try? await URLSession.shared.data(for: probe))?.1 as? HTTPURLResponse)?.statusCode == 200
+      guard ok else {
+        downUntil = Date().addingTimeInterval(60)
+        DiagLog.log("tts: PC unreachable — using backup voice for 60 s")
+        throw TTSFailure(message: "המחשב לא זמין — קול גיבוי")
+      }
+      lastOK = Date()
+    }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     // BlueTTS on the PC's CPU takes ~3–4 s per sentence; GPU is faster.
@@ -312,10 +331,12 @@ enum PCVoiceTTS {
       let (data, response) = try await URLSession.shared.data(for: request)
       let code = (response as? HTTPURLResponse)?.statusCode ?? 0
       guard code == 200, !data.isEmpty else { throw TTSFailure(message: "שרת הקול במחשב החזיר \(code)") }
+      lastOK = Date()
       return data
     } catch let e as TTSFailure {
       throw e
     } catch {
+      downUntil = Date().addingTimeInterval(60)
       throw TTSFailure(message: "אין חיבור לשרת הקול במחשב — הוא דלוק? אותה רשת Wi-Fi?")
     }
   }
