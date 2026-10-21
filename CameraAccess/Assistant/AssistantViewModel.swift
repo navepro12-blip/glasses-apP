@@ -19,6 +19,8 @@ final class AssistantViewModel {
   var hasKey: Bool = !AssistantSettings.shared.anthropicKey.isEmpty
 
   var wakeActive: Bool = false
+  /// What the always-on listener hears right now (so you can see it works).
+  var ambientText: String = ""
 
   @ObservationIgnored private let input = SpeechInput()
   @ObservationIgnored private let wake = WakeWordListener()
@@ -30,6 +32,12 @@ final class AssistantViewModel {
   func attach(frameProvider: @escaping @MainActor () -> UIImage?) {
     self.frameProvider = frameProvider
     wake.onPartial = { [weak self] text in self?.heardText = text }
+    wake.onRaw = { [weak self] text in self?.ambientText = text }
+    wake.onWake = { [weak self] in
+      self?.answerText = ""
+      self?.heardText = "…"
+      Chime.play()
+    }
     wake.onCommand = { [weak self] text in
       guard let self else { return }
       self.wakeActive = false

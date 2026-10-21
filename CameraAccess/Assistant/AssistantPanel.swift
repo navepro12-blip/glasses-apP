@@ -67,9 +67,17 @@ struct AssistantPanel: View {
         }
       }
       if vm.wakeActive, vm.phase == .idle {
-        Text("👂 מקשיב… תגיד \"קלוד\" ואז את השאלה")
-          .font(.system(size: 13))
-          .foregroundStyle(.white.opacity(0.85))
+        VStack(spacing: 2) {
+          Text("👂 מקשיב… תגיד \"קלוד\" ואז את השאלה")
+            .font(.system(size: 13))
+            .foregroundStyle(.white.opacity(0.85))
+          if !vm.ambientText.isEmpty {
+            Text("שומע: \(vm.ambientText)")
+              .font(.system(size: 12))
+              .foregroundStyle(.white.opacity(0.6))
+              .lineLimit(1)
+          }
+        }
       }
       if !vm.hasKey {
         Text("הוסף מפתח Anthropic בהגדרות כדי להפעיל את Claude")

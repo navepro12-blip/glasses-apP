@@ -20,6 +20,10 @@ final class WakeWordListener {
   var onWakeOnly: (@MainActor () -> Void)?
   /// Live text after the wake word, for the on-screen transcript.
   var onPartial: (@MainActor (String) -> Void)?
+  /// Everything currently being heard (before the wake word too), for feedback.
+  var onRaw: (@MainActor (String) -> Void)?
+  /// Fired once when the wake word is first detected.
+  var onWake: (@MainActor () -> Void)?
 
   private(set) var isRunning = false
   private var language: ListenLanguage = .hebrew
@@ -62,7 +66,7 @@ final class WakeWordListener {
 
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
-    if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+    req.requiresOnDeviceRecognition = false
     request = req
 
     let input = engine.inputNode
@@ -89,6 +93,7 @@ final class WakeWordListener {
   }
 
   private func handle(_ text: String) {
+    onRaw?(String(text.suffix(60)))
     let lower = text.lowercased()
     var after: String?
     for word in Self.wakeWords {
@@ -98,6 +103,7 @@ final class WakeWordListener {
       }
     }
     guard let tail = after else { return }
+    if !armed { onWake?() }
     armed = true
     command = tail.trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?:–-").union(.whitespacesAndNewlines))
     onPartial?(command)
@@ -161,4 +167,13 @@ extension Notification.Name {
   static let glassesTapPause = Notification.Name("NaveGlasses.tapPause")
   /// Posted when a second tap resumes the stream.
   static let glassesTapResume = Notification.Name("NaveGlasses.tapResume")
+}
+
+import AudioToolbox
+
+/// Short "I heard you" sound when the wake word is caught.
+enum Chime {
+  static func play() {
+    AudioServicesPlaySystemSound(1113)
+  }
 }
