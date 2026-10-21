@@ -437,7 +437,7 @@ enum AudioRoute {
     configure(preferPhoneMic: preferPhoneMic)
   }
 
-  private static let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
+  private static let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers, .duckOthers]
 
   nonisolated(unsafe) private static var lastActivation = Date.distantPast
 
@@ -447,7 +447,12 @@ enum AudioRoute {
   private static func configure(preferPhoneMic: Bool?) {
     let session = AVAudioSession.sharedInstance()
     do {
-      if session.category != .playAndRecord || session.mode != .default || session.categoryOptions != options {
+      // iOS normalises the options it reports, so compare as a superset —
+      // an exact compare made us call setCategory on every listen, which
+      // renegotiated Bluetooth HFP and failed ('!int' / 'what').
+      if session.category != .playAndRecord || session.mode != .default
+        || !session.categoryOptions.isSuperset(of: options)
+      {
         DiagLog.log("audio: setCategory playAndRecord (was \(session.category.rawValue)/\(session.mode.rawValue))")
         try session.setCategory(.playAndRecord, mode: .default, options: options)
         lastActivation = .distantPast
