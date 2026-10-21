@@ -145,6 +145,11 @@ final class AssistantSettings {
     get { HebrewVoice(rawValue: defaults.string(forKey: "hebrewVoice") ?? "") ?? .hila }
     set { defaults.set(newValue.rawValue, forKey: "hebrewVoice") }
   }
+  /// Always listen for "קלוד" (hands-free).
+  var wakeWordEnabled: Bool {
+    get { defaults.object(forKey: "wakeWordEnabled") as? Bool ?? false }
+    set { defaults.set(newValue, forKey: "wakeWordEnabled") }
+  }
   /// Send the current glasses frame with each question.
   var useCamera: Bool {
     get { defaults.object(forKey: "useCamera") as? Bool ?? true }

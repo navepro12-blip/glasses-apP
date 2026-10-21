@@ -531,6 +531,13 @@ final class CameraViewModel {
   }
 
   private func handleStreamStateChange(_ state: StreamState) {
+    // A single tap on the glasses touchpad pauses the stream and another tap
+    // resumes it — reuse that as a hands-free trigger for Claude.
+    if state == .paused, streamState == .streaming {
+      NotificationCenter.default.post(name: .glassesTapPause, object: nil)
+    } else if state == .streaming, streamState == .paused {
+      NotificationCenter.default.post(name: .glassesTapResume, object: nil)
+    }
     streamState = state
     if state == .stopped {
       // Terminal — finalize any recording, then converge teardown. Covers both

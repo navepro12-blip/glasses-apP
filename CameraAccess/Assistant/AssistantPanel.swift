@@ -66,6 +66,11 @@ struct AssistantPanel: View {
             .background(.white.opacity(0.15), in: Circle())
         }
       }
+      if vm.wakeActive, vm.phase == .idle {
+        Text("👂 מקשיב… תגיד \"קלוד\" ואז את השאלה")
+          .font(.system(size: 13))
+          .foregroundStyle(.white.opacity(0.85))
+      }
       if !vm.hasKey {
         Text("הוסף מפתח Anthropic בהגדרות כדי להפעיל את Claude")
           .font(.system(size: 13))
@@ -124,6 +129,7 @@ struct AssistantSettingsView: View {
   @State private var pcVoice = AssistantSettings.shared.pcVoice
   @State private var useCamera = AssistantSettings.shared.useCamera
   @State private var testing = false
+  @State private var wakeWord = AssistantSettings.shared.wakeWordEnabled
 
   var body: some View {
     NavigationStack {
@@ -136,6 +142,7 @@ struct AssistantSettingsView: View {
             ForEach(ClaudeModel.allCases) { Text($0.label).tag($0) }
           }
           Toggle("לשלוח את מה שהמשקפיים רואים", isOn: $useCamera)
+          Toggle("האזנה רציפה למילה \"קלוד\" (בלי ללחוץ)", isOn: $wakeWord)
         } header: {
           Text("Claude")
         } footer: {
@@ -233,5 +240,6 @@ struct AssistantSettingsView: View {
     s.geminiKey = geminiKey
     s.geminiVoice = geminiVoice
     s.useCamera = useCamera
+    s.wakeWordEnabled = wakeWord
   }
 }

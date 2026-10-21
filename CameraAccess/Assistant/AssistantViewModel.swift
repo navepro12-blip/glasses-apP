@@ -18,16 +18,83 @@ final class AssistantViewModel {
   var errorText: String?
   var hasKey: Bool = !AssistantSettings.shared.anthropicKey.isEmpty
 
+  var wakeActive: Bool = false
+
   @ObservationIgnored private let input = SpeechInput()
+  @ObservationIgnored private let wake = WakeWordListener()
+  @ObservationIgnored private var tapObservers: [NSObjectProtocol] = []
+  @ObservationIgnored private var listeningFromTap = false
   @ObservationIgnored private var history: [ChatTurn] = []
   @ObservationIgnored private var frameProvider: @MainActor () -> UIImage? = { nil }
 
   func attach(frameProvider: @escaping @MainActor () -> UIImage?) {
     self.frameProvider = frameProvider
+    wake.onPartial = { [weak self] text in self?.heardText = text }
+    wake.onCommand = { [weak self] text in
+      guard let self else { return }
+      self.wakeActive = false
+      Task { await self.ask(text) }
+    }
+    wake.onWakeOnly = { [weak self] in
+      guard let self else { return }
+      self.wakeActive = false
+      SpeechOutput.shared.enqueue("כן?")
+      Task {
+        try? await Task.sleep(for: .milliseconds(700))
+        await self.startListening()
+      }
+    }
+    if tapObservers.isEmpty {
+      let nc = NotificationCenter.default
+      tapObservers.append(nc.addObserver(forName: .glassesTapPause, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.handleGlassesTap(resumed: false) }
+      })
+      tapObservers.append(nc.addObserver(forName: .glassesTapResume, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.handleGlassesTap(resumed: true) }
+      })
+    }
+    resumeWakeListening()
+  }
+
+  /// Tap the glasses touchpad: first tap starts listening, second tap sends.
+  private func handleGlassesTap(resumed: Bool) {
+    guard hasKey else { return }
+    if !resumed, phase == .idle {
+      listeningFromTap = true
+      Task { await startListening() }
+    } else if resumed, phase == .listening, listeningFromTap {
+      listeningFromTap = false
+      Task { await finishAndAsk() }
+    }
+  }
+
+  func setWakeWord(_ on: Bool) {
+    AssistantSettings.shared.wakeWordEnabled = on
+    if on { resumeWakeListening() } else { pauseWakeListening() }
+  }
+
+  private func resumeWakeListening() {
+    guard AssistantSettings.shared.wakeWordEnabled, hasKey, phase == .idle, !wake.isRunning else { return }
+    Task {
+      do {
+        try await wake.start(language: AssistantSettings.shared.listenLanguage)
+        wakeActive = true
+      } catch {
+        wakeActive = false
+        errorText = error.localizedDescription
+      }
+    }
+  }
+
+  private func pauseWakeListening() {
+    wake.stop()
+    wakeActive = false
   }
 
   func refreshKeyState() {
     hasKey = !AssistantSettings.shared.anthropicKey.isEmpty
+    pauseWakeListening()
+    resumeWakeListening()
   }
 
   /// Tap once to start listening, tap again to send.
@@ -38,6 +105,7 @@ final class AssistantViewModel {
     case .speaking:
       SpeechOutput.shared.stopAll()
       phase = .idle
+      resumeWakeListening()
     case .thinking: break
     }
   }
@@ -50,6 +118,7 @@ final class AssistantViewModel {
   }
 
   private func startListening() async {
+    pauseWakeListening()
     errorText = nil
     SpeechOutput.shared.stopAll()
     input.onPartial = { [weak self] text in self?.heardText = text }
@@ -60,6 +129,7 @@ final class AssistantViewModel {
     } catch {
       phase = .idle
       errorText = error.localizedDescription
+      resumeWakeListening()
     }
   }
 
@@ -69,8 +139,15 @@ final class AssistantViewModel {
     guard !question.isEmpty else {
       phase = .idle
       errorText = "לא שמעתי כלום — נסה שוב."
+      resumeWakeListening()
       return
     }
+    await ask(question)
+  }
+
+  private func ask(_ question: String) async {
+    pauseWakeListening()
+    heardText = question
     phase = .thinking
     let settings = AssistantSettings.shared
     let jpeg = settings.useCamera ? frameProvider().flatMap { ClaudeClient.jpeg($0) } : nil
@@ -90,6 +167,7 @@ final class AssistantViewModel {
       errorText = error.localizedDescription
       SpeechOutput.shared.enqueue("הייתה תקלה, נסה שוב.")
     }
+    resumeWakeListening()
   }
 
   private func waitForSpeech() async {
