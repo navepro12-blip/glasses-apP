@@ -630,6 +630,11 @@ enum WakeWord {
       let v = scalar.value
       // Hebrew points (nikud) and cantillation
       if (0x0591...0x05C7).contains(v) { continue }
+      // Invisible bidi marks — Apple's Hebrew recogniser prefixes the transcript
+      // with U+200F, so a single leading "קלוד" never matched (he had to say it twice).
+      if v == 0x200E || v == 0x200F || v == 0x061C || v == 0xFEFF || (0x202A...0x202E).contains(v)
+        || (0x2066...0x2069).contains(v)
+      { continue }
       // geresh / gershayim / quotes / apostrophes
       if v == 0x05F3 || v == 0x05F4 || v == 0x27 || v == 0x22 || v == 0x2019 || v == 0x2018 { continue }
       out.unicodeScalars.append(scalar)
