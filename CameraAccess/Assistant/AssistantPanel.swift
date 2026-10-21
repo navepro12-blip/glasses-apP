@@ -114,6 +114,12 @@ struct AssistantSettingsView: View {
   @State private var language = AssistantSettings.shared.listenLanguage
   @State private var model = AssistantSettings.shared.model
   @State private var voice = AssistantSettings.shared.hebrewVoice
+  @State private var provider = AssistantSettings.shared.voiceProvider
+  @State private var elevenKey = AssistantSettings.shared.elevenKey
+  @State private var elevenVoiceID = AssistantSettings.shared.elevenVoiceID
+  @State private var geminiKey = AssistantSettings.shared.geminiKey
+  @State private var geminiVoice = AssistantSettings.shared.geminiVoice
+  @State private var voiceError: String?
   @State private var useCamera = AssistantSettings.shared.useCamera
   @State private var testing = false
 
@@ -142,28 +148,48 @@ struct AssistantSettingsView: View {
         }
 
         Section {
-          SecureField("Azure Speech key", text: $azureKey)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-          TextField("Region (למשל westeurope)", text: $azureRegion)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-          Picker("קול עברי", selection: $voice) {
-            ForEach(HebrewVoice.allCases) { Text($0.label).tag($0) }
+          Picker("ספק קול", selection: $provider) {
+            ForEach(VoiceProvider.allCases) { Text($0.label).tag($0) }
+          }
+          switch provider {
+          case .apple:
+            Text("קול איכותי יותר: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית ← להוריד Enhanced.")
+              .font(.footnote)
+          case .azure:
+            SecureField("Azure Speech key", text: $azureKey)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("Region (למשל eastus)", text: $azureRegion)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Picker("קול עברי", selection: $voice) {
+              ForEach(HebrewVoice.allCases) { Text($0.label).tag($0) }
+            }
+          case .eleven:
+            SecureField("ElevenLabs API key", text: $elevenKey)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("Voice ID", text: $elevenVoiceID)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+          case .gemini:
+            SecureField("Gemini API key (AI Studio)", text: $geminiKey)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("שם קול (Kore, Puck, Zephyr…)", text: $geminiVoice)
+              .textInputAutocapitalization(.never).autocorrectionDisabled()
           }
           Button(testing ? "משמיע…" : "בדיקת קול") {
             save()
             testing = true
-            SpeechOutput.shared.enqueue("היי נווה, ככה אני נשמע במשקפיים.")
+            voiceError = nil
+            SpeechOutput.shared.enqueue("היי נווה, ככה אני נשמע במשקפיים. בוא נבדוק אבן חדשה.")
             Task {
-              try? await Task.sleep(for: .seconds(4))
+              try? await Task.sleep(for: .seconds(6))
+              voiceError = SpeechOutput.shared.lastVoiceError
               testing = false
             }
           }
+          if let voiceError {
+            Text("⚠️ \(voiceError) — הושמע קול האייפון במקום").font(.footnote).foregroundStyle(.orange)
+          }
         } header: {
-          Text("קול (עברית טבעית)")
-        } footer: {
-          Text("בלי מפתח Azure משתמשים בקול העברי של האייפון. קול איכותי יותר: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית.")
+          Text("קול")
         }
       }
       .environment(\.layoutDirection, .rightToLeft)
@@ -187,6 +213,11 @@ struct AssistantSettingsView: View {
     s.listenLanguage = language
     s.model = model
     s.hebrewVoice = voice
+    s.voiceProvider = provider
+    s.elevenKey = elevenKey
+    s.elevenVoiceID = elevenVoiceID
+    s.geminiKey = geminiKey
+    s.geminiVoice = geminiVoice
     s.useCamera = useCamera
   }
 }

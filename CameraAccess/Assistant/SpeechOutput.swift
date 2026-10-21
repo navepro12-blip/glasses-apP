@@ -19,8 +19,8 @@ final class SpeechOutput: NSObject {
   private let synth = AVSpeechSynthesizer()
   private var finish: CheckedContinuation<Void, Never>?
 
-  /// Set when the last Azure request failed, so the UI can show why it fell back.
-  private(set) var lastAzureError: String?
+  /// Set when the last cloud voice request failed, so the UI can show why it fell back.
+  private(set) var lastVoiceError: String?
 
   override init() {
     super.init()
@@ -55,18 +55,27 @@ final class SpeechOutput: NSObject {
   }
 
   private func speakOne(_ text: String) async {
-    let settings = AssistantSettings.shared
-    if !settings.azureKey.isEmpty {
-      do {
-        let audio = try await AzureTTS.synthesize(
-          text: text, key: settings.azureKey, region: settings.azureRegion,
-          hebrewVoice: settings.hebrewVoice.rawValue)
-        lastAzureError = nil
+    let s = AssistantSettings.shared
+    do {
+      let audio: Data?
+      switch s.voiceProvider {
+      case .apple:
+        audio = nil
+      case .azure:
+        audio = try await AzureTTS.synthesize(
+          text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
+      case .eleven:
+        audio = try await ElevenTTS.synthesize(text: text, key: s.elevenKey, voiceID: s.elevenVoiceID)
+      case .gemini:
+        audio = try await GeminiTTS.synthesize(text: text, key: s.geminiKey, voice: s.geminiVoice)
+      }
+      if let audio {
+        lastVoiceError = nil
         await play(audio)
         return
-      } catch {
-        lastAzureError = error.localizedDescription
       }
+    } catch {
+      lastVoiceError = error.localizedDescription
     }
     await speakWithApple(text)
   }
@@ -175,6 +184,86 @@ enum AzureTTS {
       .replacingOccurrences(of: ">", with: "&gt;")
       .replacingOccurrences(of: "\"", with: "&quot;")
       .replacingOccurrences(of: "'", with: "&apos;")
+  }
+}
+
+struct TTSFailure: LocalizedError {
+  let message: String
+  var errorDescription: String? { message }
+}
+
+/// ElevenLabs v3 — the most natural Hebrew of the cloud options (slower, paid
+/// beyond the free monthly quota). Must use `language_code: he` with v3.
+enum ElevenTTS {
+  static func synthesize(text: String, key: String, voiceID: String) async throws -> Data {
+    guard !key.isEmpty else { throw TTSFailure(message: "חסר מפתח ElevenLabs") }
+    let id = voiceID.isEmpty ? "21m00Tcm4TlvDq8ikWAM" : voiceID
+    var request = URLRequest(
+      url: URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(id)?output_format=mp3_44100_128")!)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 30
+    request.setValue(key, forHTTPHeaderField: "xi-api-key")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    var body: [String: Any] = ["text": text, "model_id": "eleven_v3"]
+    if TextLanguage.isHebrew(text) { body["language_code"] = "he" }
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    let (data, response) = try await URLSession.shared.data(for: request)
+    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    guard code == 200, !data.isEmpty else {
+      let msg = String(data: data, encoding: .utf8)?.prefix(160) ?? ""
+      throw TTSFailure(message: "ElevenLabs \(code): \(msg)")
+    }
+    return data
+  }
+}
+
+/// Gemini TTS (Google AI Studio key). Returns 24 kHz 16-bit mono PCM, wrapped
+/// here in a WAV header so AVAudioPlayer can play it.
+enum GeminiTTS {
+  static func synthesize(text: String, key: String, voice: String) async throws -> Data {
+    guard !key.isEmpty else { throw TTSFailure(message: "חסר מפתח Gemini") }
+    let model = "gemini-2.5-flash-preview-tts"
+    var request = URLRequest(
+      url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 30
+    request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    let body: [String: Any] = [
+      "contents": [["parts": [["text": text]]]],
+      "generationConfig": [
+        "responseModalities": ["AUDIO"],
+        "speechConfig": ["voiceConfig": ["prebuiltVoiceConfig": ["voiceName": voice.isEmpty ? "Kore" : voice]]],
+      ],
+    ]
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    let (data, response) = try await URLSession.shared.data(for: request)
+    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    guard code == 200,
+      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let candidates = json["candidates"] as? [[String: Any]],
+      let content = candidates.first?["content"] as? [String: Any],
+      let parts = content["parts"] as? [[String: Any]],
+      let inline = parts.compactMap({ $0["inlineData"] as? [String: Any] }).first,
+      let b64 = inline["data"] as? String,
+      let pcm = Data(base64Encoded: b64)
+    else {
+      let msg = String(data: data, encoding: .utf8)?.prefix(160) ?? ""
+      throw TTSFailure(message: "Gemini \(code): \(msg)")
+    }
+    return wav(pcm: pcm, sampleRate: 24000)
+  }
+
+  static func wav(pcm: Data, sampleRate: UInt32, channels: UInt16 = 1, bits: UInt16 = 16) -> Data {
+    var d = Data()
+    func u32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
+    func u16(_ v: UInt16) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 2)) }
+    let byteRate = sampleRate * UInt32(channels) * UInt32(bits / 8)
+    d.append(Data("RIFF".utf8)); u32(36 + UInt32(pcm.count)); d.append(Data("WAVE".utf8))
+    d.append(Data("fmt ".utf8)); u32(16); u16(1); u16(channels); u32(sampleRate); u32(byteRate)
+    u16(channels * bits / 8); u16(bits)
+    d.append(Data("data".utf8)); u32(UInt32(pcm.count)); d.append(pcm)
+    return d
   }
 }
 

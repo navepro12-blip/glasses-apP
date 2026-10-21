@@ -64,6 +64,19 @@ enum ClaudeModel: String, CaseIterable, Identifiable {
   var label: String { self == .sonnet ? "Sonnet (חכם)" : "Haiku (מהיר)" }
 }
 
+enum VoiceProvider: String, CaseIterable, Identifiable {
+  case apple, azure, eleven, gemini
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .apple: return "אייפון (חינם)"
+    case .azure: return "Azure"
+    case .eleven: return "ElevenLabs"
+    case .gemini: return "Gemini"
+    }
+  }
+}
+
 enum HebrewVoice: String, CaseIterable, Identifiable {
   case hila = "he-IL-HilaNeural"
   case avri = "he-IL-AvriNeural"
@@ -83,6 +96,29 @@ final class AssistantSettings {
   var azureKey: String {
     get { SecretStore.get("azure") }
     set { SecretStore.set("azure", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+  }
+  var elevenKey: String {
+    get { SecretStore.get("eleven") }
+    set { SecretStore.set("eleven", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+  }
+  var elevenVoiceID: String {
+    get { defaults.string(forKey: "elevenVoiceID") ?? "21m00Tcm4TlvDq8ikWAM" }
+    set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "elevenVoiceID") }
+  }
+  var geminiKey: String {
+    get { SecretStore.get("gemini") }
+    set { SecretStore.set("gemini", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+  }
+  var geminiVoice: String {
+    get { defaults.string(forKey: "geminiVoice") ?? "Kore" }
+    set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "geminiVoice") }
+  }
+  var voiceProvider: VoiceProvider {
+    get {
+      if let raw = defaults.string(forKey: "voiceProvider"), let v = VoiceProvider(rawValue: raw) { return v }
+      return azureKey.isEmpty ? .apple : .azure
+    }
+    set { defaults.set(newValue.rawValue, forKey: "voiceProvider") }
   }
   var azureRegion: String {
     get { defaults.string(forKey: "azureRegion") ?? "westeurope" }
