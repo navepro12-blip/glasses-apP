@@ -5,7 +5,9 @@
 //
 
 import Contacts
+import CoreLocation
 import Foundation
+import MapKit
 import UIKit
 
 @MainActor
@@ -156,6 +158,9 @@ final class ToolBox {
       }
       return await Navigator.navigate(to: input["destination"] as? String ?? "")
 
+    case "distance_to":
+      return await Self.distance(to: input["place"] as? String ?? "")
+
     case "where_am_i":
       LocationContext.shared.start()
       if let fix = await LocationContext.shared.currentFix(maxWait: 4) {
@@ -169,6 +174,36 @@ final class ToolBox {
     default:
       return "Unknown tool \(name)."
     }
+  }
+
+  /// Local search near the current fix + driving ETA.
+  static func distance(to place: String) async -> String {
+    guard !place.trimmingCharacters(in: .whitespaces).isEmpty else { return "No place given." }
+    LocationContext.shared.start()
+    guard let fix = await LocationContext.shared.currentFix(maxWait: 4) else {
+      return "No location fix — location may be off (iPhone Settings → Nave Glasses → Location)."
+    }
+    let here = CLLocationCoordinate2D(latitude: fix.latitude, longitude: fix.longitude)
+    let request = MKLocalSearch.Request()
+    request.naturalLanguageQuery = place
+    request.region = MKCoordinateRegion(center: here, latitudinalMeters: 60_000, longitudinalMeters: 60_000)
+    guard let response = try? await MKLocalSearch(request: request).start(),
+      let item = response.mapItems.first
+    else { return "Couldn't find \(place) on the map." }
+    let target = item.placemark.coordinate
+    let meters = CLLocation(latitude: here.latitude, longitude: here.longitude)
+      .distance(from: CLLocation(latitude: target.latitude, longitude: target.longitude))
+    let address = [item.placemark.thoroughfare, item.placemark.subThoroughfare, item.placemark.locality]
+      .compactMap { $0 }.joined(separator: " ")
+    var line = "\(item.name ?? place) — \(address). Straight-line distance \(String(format: "%.1f", meters / 1000)) km."
+    let directions = MKDirections.Request()
+    directions.source = MKMapItem(placemark: MKPlacemark(coordinate: here))
+    directions.destination = item
+    directions.transportType = .automobile
+    if let eta = try? await MKDirections(request: directions).calculateETA() {
+      line += " Driving about \(Int((eta.expectedTravelTime / 60).rounded())) min (\(String(format: "%.1f", eta.distance / 1000)) km by road)."
+    }
+    return line
   }
 
   private static func int(_ value: Any?) -> Int? {

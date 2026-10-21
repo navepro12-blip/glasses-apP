@@ -282,7 +282,7 @@ struct AssistantSettingsView: View {
             testing = true
             voiceError = nil
             SpeechOutput.shared.stopAll()
-            SpeechOutput.shared.enqueue("היי נווה, ככה אני נשמע במשקפיים.")
+            SpeechOutput.shared.enqueue("היי נווה, אני נועה, ככה אני נשמעת במשקפיים.")
             Task {
               await SpeechOutput.shared.waitUntilIdle(maxSeconds: 30)
               voiceError = SpeechOutput.shared.lastVoiceError

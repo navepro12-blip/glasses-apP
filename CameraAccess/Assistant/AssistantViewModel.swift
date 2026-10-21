@@ -433,6 +433,16 @@ final class AssistantViewModel {
     sentencesSpoken = 0
     answerText = ""
     let progress = AskProgress()
+    // Never sit on "חושב…" forever: give up after 30 s without a first token.
+    let watchdog = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(30))
+      guard let self, !Task.isCancelled, self.phase == .thinking, !progress.gotToken else { return }
+      DiagLog.log("claude: no answer after 30 s — giving up")
+      self.cancelCurrent(reason: "timeout", chime: false, restartWake: true)
+      self.showError("לקח יותר מדי זמן — נסה שוב")
+      SpeechOutput.shared.enqueue("לקח לי יותר מדי זמן, נסה שוב.")
+    }
+    defer { watchdog.cancel() }
     client.onTool = { [weak self] name in
       guard let self, !progress.gotToken, !progress.fillerSaid else { return }
       // A tool (web search, calendar…) is running: after 3 s say we're on it.
@@ -442,7 +452,7 @@ final class AssistantViewModel {
         guard let self, !Task.isCancelled, self.phase == .thinking, !progress.gotToken, !progress.fillerSaid else { return }
         progress.fillerSaid = true
         DiagLog.log("state: filler after slow tool \(name)")
-        SpeechOutput.shared.enqueue("רגע, בודק…")
+        SpeechOutput.shared.enqueue("רגע, בודקת…")
         await SpeechOutput.shared.waitUntilIdle(maxSeconds: 6)
         if self.phase == .thinking, !progress.gotToken { Chime.startThinking() }
       }
