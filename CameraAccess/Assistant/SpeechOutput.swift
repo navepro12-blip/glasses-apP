@@ -41,6 +41,20 @@ final class SpeechOutput: NSObject {
     return spokenRecently.reduce(into: Set<String>()) { $0.formUnion($1.1) }
   }
 
+  static func splitLong(_ text: String, maxLen: Int = 90) -> [String] {
+    var parts: [String] = []
+    var current = ""
+    for piece in text.split(separator: ",", omittingEmptySubsequences: false) {
+      let p = String(piece)
+      if current.isEmpty { current = p } else if current.count + p.count + 1 <= maxLen { current += "," + p } else {
+        parts.append(current.trimmingCharacters(in: .whitespaces) + ",")
+        current = p
+      }
+    }
+    if !current.trimmingCharacters(in: .whitespaces).isEmpty { parts.append(current.trimmingCharacters(in: .whitespaces)) }
+    return parts.filter { !$0.isEmpty }
+  }
+
   /// Words in `text` that we did NOT just say (i.e. the user talking over us).
   func newWordCount(_ text: String) -> Int {
     let words = text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { WakeWord.normalize(String($0)) }
@@ -68,6 +82,14 @@ final class SpeechOutput: NSObject {
   func enqueue(_ text: String) {
     let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !clean.isEmpty else { return }
+    // Long sentences are slow to synthesise in one piece: split at commas.
+    if clean.count > 90 {
+      let parts = Self.splitLong(clean)
+      if parts.count > 1 {
+        parts.forEach { enqueue($0) }
+        return
+      }
+    }
     // Start synthesis right away (prefetch); playback happens in order.
     let audio = Task { await self.fetchAudio(clean) }
     queue.append(Item(text: clean, audio: audio, enqueued: Date()))
@@ -152,7 +174,15 @@ final class SpeechOutput: NSObject {
       case .apple:
         return nil
       case .pc:
-        audio = try await PCVoiceTTS.synthesize(text: text, baseURL: s.pcURL, voice: s.pcVoice)
+        do {
+          audio = try await PCVoiceTTS.synthesize(text: text, baseURL: s.pcURL, voice: s.pcVoice)
+        } catch {
+          // PC busy (rendering/transcribing) or away from home: Azure if set up.
+          guard !s.azureKey.isEmpty else { throw error }
+          DiagLog.log("tts: pc failed (\(error.localizedDescription)) → Azure backup")
+          audio = try await AzureTTS.synthesize(
+            text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
+        }
       case .azure:
         audio = try await AzureTTS.synthesize(
           text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
@@ -331,8 +361,9 @@ enum PCVoiceTTS {
     }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
-    // BlueTTS on the PC's CPU takes ~3–4 s per sentence; GPU is faster.
-    request.timeoutInterval = 20
+    // A sentence normally takes 1–2 s on the GPU; if the PC is busy we'd
+    // rather fall back than keep him waiting.
+    request.timeoutInterval = 6
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "voice": voice])
     do {
@@ -343,6 +374,8 @@ enum PCVoiceTTS {
       return data
     } catch let e as TTSFailure {
       throw e
+    } catch let e as URLError where e.code == .timedOut {
+      throw TTSFailure(message: "המחשב עמוס — הקול לקח יותר מ-6 שניות")
     } catch {
       downUntil = Date().addingTimeInterval(60)
       throw TTSFailure(message: "אין חיבור לשרת הקול במחשב — הוא דלוק? אותה רשת Wi-Fi?")
