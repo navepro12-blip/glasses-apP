@@ -7,6 +7,7 @@
 //
 
 @preconcurrency import AVFoundation
+import AudioToolbox
 import Foundation
 @preconcurrency import Speech
 
@@ -169,7 +170,6 @@ extension Notification.Name {
   static let glassesTapResume = Notification.Name("NaveGlasses.tapResume")
 }
 
-import AudioToolbox
 
 /// Short "I heard you" sound when the wake word is caught.
 enum Chime {
