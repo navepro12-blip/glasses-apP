@@ -82,6 +82,10 @@ struct CameraView: View {
 
         Spacer(minLength: 0)
 
+        AssistantPanel(frameProvider: { [viewModel] in viewModel.currentVideoFrame })
+          .padding(.horizontal, 20)
+          .padding(.bottom, 4)
+
         bottomBar
       }
     }

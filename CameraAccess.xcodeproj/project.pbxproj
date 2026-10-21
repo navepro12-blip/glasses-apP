@@ -38,6 +38,12 @@
 		D7A0000000000000000000AA /* AudioInputHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000A9 /* AudioInputHandler.swift */; };
 		D7A0000000000000000000AC /* AudioCaptureHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000AB /* AudioCaptureHandler.swift */; };
 		D7A0000000000000000000B2 /* CameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000B1 /* CameraView.swift */; };
+		11F32CCD5579074CC4217ECF /* AssistantSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10717D6924F49874B9485AA4 /* AssistantSettings.swift */; };
+		07BEE94EA958ECCFE88118DF /* ClaudeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B479FAB4302914BEB0DB837 /* ClaudeClient.swift */; };
+		8E075FC92F9D2C74129F581B /* SpeechOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC9238B0C9E472E429221825 /* SpeechOutput.swift */; };
+		A75BD5BE5A7AAF41B7CAB8AD /* SpeechInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F7BDDC132341EBB8178B92 /* SpeechInput.swift */; };
+		06E7C60E5D59C060DA9C2CF6 /* AssistantViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DEA5483290DF6EC4F0E7333 /* AssistantViewModel.swift */; };
+		D9AE0E9207E8EA21BCC8BC87 /* AssistantPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF74F2FD771D857AF6E781 /* AssistantPanel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -103,6 +109,12 @@
 		D7A0000000000000000000A9 /* AudioInputHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputHandler.swift; sourceTree = "<group>"; };
 		D7A0000000000000000000AB /* AudioCaptureHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureHandler.swift; sourceTree = "<group>"; };
 		D7A0000000000000000000B1 /* CameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraView.swift; sourceTree = "<group>"; };
+		10717D6924F49874B9485AA4 /* AssistantSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantSettings.swift; sourceTree = "<group>"; };
+		2B479FAB4302914BEB0DB837 /* ClaudeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeClient.swift; sourceTree = "<group>"; };
+		EC9238B0C9E472E429221825 /* SpeechOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechOutput.swift; sourceTree = "<group>"; };
+		42F7BDDC132341EBB8178B92 /* SpeechInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechInput.swift; sourceTree = "<group>"; };
+		8DEA5483290DF6EC4F0E7333 /* AssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantViewModel.swift; sourceTree = "<group>"; };
+		B1FF74F2FD771D857AF6E781 /* AssistantPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantPanel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -203,6 +215,7 @@
 				E66CC01A2F3E1A9300B07379 /* TestResources */,
 				8FD96B702E6F0A9800F56AB1 /* ViewModels */,
 				D7A0000000000000000000F0 /* Media */,
+				1ED7436BE0EC53D5B5E0E0A1 /* Assistant */,
 				8FD96B762E6F0A9800F56AB1 /* Views */,
 				8FD96B772E6F0A9800F56AB1 /* Assets.xcassets */,
 				8FD96B782E6F0A9800F56AB1 /* CameraAccess.entitlements */,
@@ -250,6 +263,19 @@
 				E66D30232E7DA71900470B48 /* MockDeviceKitButton.swift */,
 			);
 			path = MockDeviceKit;
+			sourceTree = "<group>";
+		};
+		1ED7436BE0EC53D5B5E0E0A1 /* Assistant */ = {
+			isa = PBXGroup;
+			children = (
+				10717D6924F49874B9485AA4 /* AssistantSettings.swift */,
+				2B479FAB4302914BEB0DB837 /* ClaudeClient.swift */,
+				EC9238B0C9E472E429221825 /* SpeechOutput.swift */,
+				42F7BDDC132341EBB8178B92 /* SpeechInput.swift */,
+				8DEA5483290DF6EC4F0E7333 /* AssistantViewModel.swift */,
+				B1FF74F2FD771D857AF6E781 /* AssistantPanel.swift */,
+			);
+			path = Assistant;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -406,6 +432,12 @@
 				E6DA451E2E79A63100E3F688 /* CardView.swift in Sources */,
 				E6DA451F2E79A63100E3F688 /* MockDeviceKitView.swift in Sources */,
 				8FD96B872E6F0A9800F56AB1 /* CameraViewModel.swift in Sources */,
+				11F32CCD5579074CC4217ECF /* AssistantSettings.swift in Sources */,
+				07BEE94EA958ECCFE88118DF /* ClaudeClient.swift in Sources */,
+				8E075FC92F9D2C74129F581B /* SpeechOutput.swift in Sources */,
+				A75BD5BE5A7AAF41B7CAB8AD /* SpeechInput.swift in Sources */,
+				06E7C60E5D59C060DA9C2CF6 /* AssistantViewModel.swift in Sources */,
+				D9AE0E9207E8EA21BCC8BC87 /* AssistantPanel.swift in Sources */,
 				8FFD60602E84A2F70035E446 /* MainAppView.swift in Sources */,
 				8FFD60612E84A2F70035E446 /* DebugMenuView.swift in Sources */,
 				8FD96B8A2E6F0A9800F56AB1 /* CapturePreviewView.swift in Sources */,

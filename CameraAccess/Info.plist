@@ -77,6 +77,10 @@
 	<string>This app needs access to save photos captured from your glasses.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>This app needs camera access to stream from your phone's camera as a mock device feed.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>So you can talk to Claude through your glasses.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>So Claude can find the person you ask to call.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs microphone access to record sound from your glasses' microphone alongside video.</string>
 	<key>UIApplicationSceneManifest</key>
