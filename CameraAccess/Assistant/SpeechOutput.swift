@@ -32,6 +32,25 @@ final class SpeechOutput: NSObject {
 
   /// Set when the last cloud voice request failed, so the UI can show why it fell back.
   private(set) var lastVoiceError: String?
+  /// Words we spoke in the last ~30 s — used to ignore our own echo in the mic.
+  private var spokenRecently: [(Date, Set<String>)] = []
+
+  var recentlySpokenTokens: Set<String> {
+    let cutoff = Date().addingTimeInterval(-30)
+    spokenRecently.removeAll { $0.0 < cutoff }
+    return spokenRecently.reduce(into: Set<String>()) { $0.formUnion($1.1) }
+  }
+
+  /// True when most of `text` was just spoken by us (echo through the glasses mic).
+  func looksLikeEcho(_ text: String) -> Bool {
+    let words = text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { WakeWord.normalize(String($0)) }
+      .filter { $0.count >= 2 }
+    guard words.count >= 2 else { return false }
+    let spoken = recentlySpokenTokens
+    guard !spoken.isEmpty else { return false }
+    let hits = words.filter { spoken.contains($0) }.count
+    return Double(hits) / Double(words.count) >= 0.6
+  }
 
   override init() {
     super.init()
@@ -44,6 +63,8 @@ final class SpeechOutput: NSObject {
     // Start synthesis right away (prefetch); playback happens in order.
     let audio = Task { await self.fetchAudio(clean) }
     queue.append(Item(text: clean, audio: audio, enqueued: Date()))
+    let tokens = clean.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { WakeWord.normalize(String($0)) }
+    spokenRecently.append((Date(), Set(tokens)))
     // Flip the flag synchronously: two enqueues in the same tick must not
     // start two drain loops (they would fight over the single continuation).
     if !isSpeaking {
@@ -94,6 +115,7 @@ final class SpeechOutput: NSObject {
       let audio = await item.audio.value
       if Task.isCancelled { break }
       let waited = Int(Date().timeIntervalSince(item.enqueued) * 1000)
+      Chime.stopThinking()
       if let audio {
         DiagLog.log("tts: play \(audio.count) bytes (ready \(waited) ms after enqueue)\(sinceTrace())")
         await play(audio)
@@ -398,6 +420,17 @@ enum AudioRoute {
 
   static func activateForPlayback() {
     configure(preferPhoneMic: nil)
+  }
+
+  /// Releases the shared session so iOS drops the orange microphone indicator.
+  static func deactivate(reason: String) {
+    do {
+      try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      lastActivation = .distantPast
+      DiagLog.log("mic: CLOSED — session deactivated (\(reason))")
+    } catch {
+      DiagLog.log("mic: deactivate failed (\(reason)): \(error.localizedDescription)")
+    }
   }
 
   static func activateForListening(preferPhoneMic: Bool = false) {

@@ -258,6 +258,8 @@ final class CameraViewModel {
   /// when `.stopped` arrives.
   func endSession() {
     guard let session = deviceSession else { return }
+    userEndedSession = true
+    DiagLog.log("session: ended by user")
     // Reflect the in-flight stop immediately so the controls disable at once; the
     // state observer drives it onward to `.stopped`.
     sessionState = .stopping
@@ -465,8 +467,30 @@ final class CameraViewModel {
     deviceMonitorTask = Task { [weak self] in
       guard let self else { return }
       for await deviceId in deviceSelector.activeDeviceStream() {
-        hasActiveDevice = deviceId != nil
+        let active = deviceId != nil
+        hasActiveDevice = active
+        handleDeviceActivity(active)
       }
+    }
+  }
+
+  /// Set when the user ended the session himself: no auto-reconnect until the
+  /// glasses go back in the case (device inactive) and come out again.
+  @ObservationIgnored private var userEndedSession = false
+
+  /// Like Meta AI: the session starts by itself when the glasses come out of the
+  /// case / are worn, and ends when they go away — so the assistant is always ready.
+  private func handleDeviceActivity(_ active: Bool) {
+    if active {
+      guard AssistantSettings.shared.autoConnect, !userEndedSession, !hasSession else { return }
+      DiagLog.log("auto: glasses active → starting session")
+      startSession()
+    } else {
+      userEndedSession = false
+      guard hasSession else { return }
+      DiagLog.log("auto: glasses inactive → ending session")
+      sessionState = .stopping
+      deviceSession?.stop()
     }
   }
 
@@ -483,7 +507,15 @@ final class CameraViewModel {
     guard hasSession, hasStream, sessionState != .stopping else { return }
 
     beginBackgroundStopErrorSuppression()
-    endSession()
+    if AssistantSettings.shared.backgroundListening {
+      // Keep the session (so Claude keeps listening in the background); only
+      // the camera stream stops. Claude then answers without an image.
+      DiagLog.log("auto: background — stopping the stream, keeping the session")
+      stopStreaming()
+    } else {
+      endSession()
+      userEndedSession = false
+    }
   }
 
   private func beginBackgroundStopErrorSuppression() {

@@ -180,6 +180,9 @@ struct AssistantSettingsView: View {
   @State private var followUp = AssistantSettings.shared.followUpEnabled
   @State private var location = AssistantSettings.shared.locationEnabled
   @State private var micSource = AssistantSettings.shared.micSource
+  @State private var autoConnect = AssistantSettings.shared.autoConnect
+  @State private var backgroundListening = AssistantSettings.shared.backgroundListening
+  @State private var idleTimeout = AssistantSettings.shared.idleTimeoutSeconds
 
   var body: some View {
     NavigationStack {
@@ -195,6 +198,9 @@ struct AssistantSettingsView: View {
           Toggle("האזנה רציפה למילה \"קלוד\" (בלי ללחוץ)", isOn: $wakeWord)
           Toggle("חלון המשך אחרי תשובה (בלי לומר \"קלוד\" שוב)", isOn: $followUp)
           Toggle("לשתף מיקום עם Claude (מזג אוויר, חניה, מה קרוב)", isOn: $location)
+          Toggle("התחברות אוטומטית כשהמשקפיים יוצאים מהנרתיק", isOn: $autoConnect)
+          Toggle("האזנה ברקע כשהמשקפיים מחוברים", isOn: $backgroundListening)
+          Stepper("זמן המתנה לשאלה: \(Int(idleTimeout)) שניות", value: $idleTimeout, in: 3...15, step: 1)
         } header: {
           Text("Claude")
         } footer: {
@@ -329,6 +335,9 @@ struct AssistantSettingsView: View {
     s.followUpEnabled = followUp
     s.locationEnabled = location
     s.micSource = micSource
+    s.autoConnect = autoConnect
+    s.backgroundListening = backgroundListening
+    s.idleTimeoutSeconds = idleTimeout
   }
 }
 

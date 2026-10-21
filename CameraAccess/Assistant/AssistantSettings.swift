@@ -186,6 +186,22 @@ final class AssistantSettings {
     get { MicSource(rawValue: defaults.string(forKey: "micSource") ?? "") ?? .auto }
     set { defaults.set(newValue.rawValue, forKey: "micSource") }
   }
+  /// Seconds of silence after "קלוד" / in the follow-up window before giving up.
+  var idleTimeoutSeconds: Double {
+    get { let v = defaults.double(forKey: "idleTimeoutSeconds"); return v > 0 ? v : 6 }
+    set { defaults.set(newValue, forKey: "idleTimeoutSeconds") }
+  }
+  /// Keep listening while the app is in the background / phone locked, as long
+  /// as the glasses are connected (default on — like Meta AI).
+  var backgroundListening: Bool {
+    get { defaults.object(forKey: "backgroundListening") as? Bool ?? true }
+    set { defaults.set(newValue, forKey: "backgroundListening") }
+  }
+  /// Start the glasses session automatically when they come out of the case.
+  var autoConnect: Bool {
+    get { defaults.object(forKey: "autoConnect") as? Bool ?? true }
+    set { defaults.set(newValue, forKey: "autoConnect") }
+  }
   /// Share a coarse location with Claude (weather, nearby, where I parked).
   var locationEnabled: Bool {
     get { defaults.object(forKey: "locationEnabled") as? Bool ?? true }

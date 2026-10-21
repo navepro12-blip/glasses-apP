@@ -73,6 +73,8 @@ struct ClaudeClient {
   let apiKey: String
   let model: String
   var tools: ToolBox?
+  /// Called when a client tool starts running (for the "רגע, בודק…" filler).
+  var onTool: (@MainActor (String) -> Void)?
 
   static var toolDefinitions: [[String: Any]] { [
     ["type": "web_search_20250305", "name": "web_search", "max_uses": 3],
@@ -293,6 +295,7 @@ struct ClaudeClient {
           let name = block["name"] as? String ?? ""
           let input = block["input"] as? [String: Any] ?? [:]
           DiagLog.log("claude: tool \(name)")
+          onTool?(name)
           let output = await tools.run(name: name, input: input)
           results.append(["type": "tool_result", "tool_use_id": id, "content": output])
         }
@@ -324,6 +327,10 @@ struct ClaudeClient {
   /// blocks so the tool-use loop can replay them.
   @MainActor
   private func stream(_ messages: [[String: Any]], onText: @MainActor (String) -> Void) async throws -> StreamResult {
+    let onServerTool: @MainActor (String) -> Void = { name in
+      DiagLog.log("claude: server tool \(name)")
+      self.onTool?(name)
+    }
     var body: [String: Any] = [
       "model": model,
       "max_tokens": 400,
@@ -374,6 +381,7 @@ struct ClaudeClient {
         let index = json["index"] as? Int ?? blocks.count
         var block = json["content_block"] as? [String: Any] ?? [:]
         if block["type"] as? String == "text" { block["text"] = "" }
+        if block["type"] as? String == "server_tool_use" { onServerTool(block["name"] as? String ?? "web_search") }
         while blocks.count <= index { blocks.append([:]) }
         blocks[index] = block
       case "content_block_delta":

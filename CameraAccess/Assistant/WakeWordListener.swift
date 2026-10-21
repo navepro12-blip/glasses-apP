@@ -21,9 +21,10 @@
 //
 
 @preconcurrency import AVFoundation
-import UIKit
 import Foundation
 @preconcurrency import Speech
+import UIKit
+import os
 
 @MainActor
 final class WakeWordListener {
@@ -39,6 +40,11 @@ final class WakeWordListener {
   var onWake: (@MainActor () -> Void)?
   /// Human-readable state for the on-screen diagnostics line.
   var onStatus: (@MainActor (String) -> Void)?
+  /// A stop phrase was heard ("לא משנה", "עצור", "stop"…).
+  var onStop: (@MainActor () -> Void)?
+  /// Set by the owner while Claude is thinking or talking: stop phrases are
+  /// accepted and our own echo is filtered (barge-in mode).
+  var conversationActive = false
 
   private(set) var isRunning = false
   private var observers: [NSObjectProtocol] = []
@@ -62,6 +68,8 @@ final class WakeWordListener {
   private var armedAt = Date.distantPast
   private var hardStopTask: Task<Void, Never>?
   private var loggedIgnoreReason = ""
+  private var lastLoggedPartial = ""
+  private var partialLogs = 0
   /// The engine stays running between questions so the Bluetooth route (HFP)
   /// doesn't flap A2DP ↔ HFP on every answer — each flip costs 1–2 s.
   private var heldFormat: AVAudioFormat?
@@ -87,8 +95,8 @@ final class WakeWordListener {
 
   /// Stops recognising. With `keepRoute` the audio engine keeps running (no
   /// tap) so the glasses stay on the HFP route while Claude thinks and talks.
-  func stop(keepRoute: Bool = false) {
-    if isRunning { DiagLog.log("wake: stop keepRoute=\(keepRoute)") }
+  func stop(keepRoute: Bool = false, reason: String = "") {
+    if isRunning || engine != nil { DiagLog.log("wake: stop keepRoute=\(keepRoute) \(reason)") }
     isRunning = false
     observers.forEach { NotificationCenter.default.removeObserver($0) }
     observers.removeAll()
@@ -101,12 +109,15 @@ final class WakeWordListener {
     restartTask = nil
     hardStopTask = nil
     tearDown(keepEngine: keepRoute)
+    _ = PreRoll.shared.drain()
     if !keepRoute { AudioRoute.assistantListening = false }
   }
 
-  /// Fully releases the microphone (app to background, listening switched off).
-  func releaseEngine() {
-    stop(keepRoute: false)
+  /// Fully releases the microphone (listening switched off, glasses away…).
+  func releaseEngine(reason: String) {
+    let hadEngine = engine != nil
+    stop(keepRoute: false, reason: reason)
+    if hadEngine { DiagLog.log("mic: engine released (\(reason))") }
   }
 
   // MARK: - Audio route / engine changes
@@ -274,7 +285,7 @@ final class WakeWordListener {
     inputUID = port?.uid ?? ""
     let route = port?.portName ?? "?"
     loggedIgnoreReason = ""
-    DiagLog.log("wake: engine \(reused ? "reused" : "started") gen=\(gen) fmt=\(Int(format.sampleRate))Hz/\(format.channelCount)ch input=\(route)/\(port?.portType.rawValue ?? "?") \(DiagLog.sessionLine())")
+    DiagLog.log("mic: OPEN — wake engine \(reused ? "reused" : "started") gen=\(gen) fmt=\(Int(format.sampleRate))Hz/\(format.channelCount)ch input=\(route)/\(port?.portType.rawValue ?? "?") \(DiagLog.sessionLine())")
     onStatus?("👂 מקשיב דרך: \(route)\(fellBackToPhoneMic ? " (אייפון)" : "")")
 
     let started = Date()
@@ -330,10 +341,21 @@ final class WakeWordListener {
 
   private func handle(_ text: String, final: Bool) {
     onRaw?(String(text.suffix(60)))
-    // Don't wake on our own voice (answers / live chat read aloud) — but only
-    // while audio is really playing, never because of a stuck flag.
-    if !armed, SpeechOutput.shared.isActuallyPlaying {
-      logIgnored("speaking (our own voice is playing)")
+    if text != lastLoggedPartial, partialLogs < 40 {
+      lastLoggedPartial = text
+      partialLogs += 1
+      DiagLog.log("wake: partial[\(partialCount)] '\(text.suffix(50))'")
+    }
+    // Stop phrase as the last words while Claude is thinking / talking
+    // (barge-in). "קלוד, לא משנה" is handled when the command is complete.
+    if !armed, conversationActive, WakeWord.endsWithStopPhrase(text), !SpeechOutput.shared.looksLikeEcho(text) {
+      DiagLog.log("wake: STOP phrase during conversation '\(text.suffix(30))'")
+      onStop?()
+      return
+    }
+    // Our own voice coming back through the glasses mic.
+    if !armed, SpeechOutput.shared.isActuallyPlaying || conversationActive, SpeechOutput.shared.looksLikeEcho(text) {
+      logIgnored("echo of our own voice: '\(text.suffix(30))'")
       return
     }
     guard let tail = WakeWord.commandAfterWakeWord(in: text) else {
@@ -377,12 +399,30 @@ final class WakeWordListener {
     }
   }
 
+  /// Forget a wake word that was followed by a cancel; keep listening.
+  private func cancelArmed() {
+    armed = false
+    command = ""
+    silenceTask?.cancel()
+    hardStopTask?.cancel()
+    silenceTask = nil
+    hardStopTask = nil
+    // Fresh request so the old transcript (with the wake word) is gone.
+    scheduleRestart(after: .milliseconds(100), reason: nil)
+  }
+
   /// Delivers the captured command (or wake-only) exactly once.
   private func fire() {
     guard isRunning, armed else { return }
     let heard = command
     DiagLog.log("wake: command '\(heard)' \(Int(Date().timeIntervalSince(armedAt) * 1000)) ms after wake")
-    stop(keepRoute: true)
+    if WakeWord.isStopPhrase(heard) {
+      DiagLog.log("wake: command is a stop phrase — cancelled")
+      cancelArmed()
+      onStop?()
+      return
+    }
+    stop(keepRoute: true, reason: "command captured")
     if heard.isEmpty { onWakeOnly?() } else { onCommand?(heard) }
   }
 
@@ -415,12 +455,18 @@ final class WakeWordListener {
     nonisolated(unsafe) let req = request
     let converter = SpeechAudio.converter(from: format)
     node.removeTap(onBus: 0)
+    // Pre-roll: the previous request's last ~1.5 s of audio is fed first, so a
+    // word spoken while the recogniser restarted/recycled isn't lost.
+    for b in PreRoll.shared.drain() { req.append(b) }
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-      if let converter, let out = SpeechAudio.convert(buffer, with: converter) {
-        req.append(out)
+      let out: AVAudioPCMBuffer
+      if let converter, let converted = SpeechAudio.convert(buffer, with: converter) {
+        out = converted
       } else {
-        req.append(buffer)
+        out = buffer
       }
+      req.append(out)
+      PreRoll.shared.push(out)
     }
   }
 
@@ -435,6 +481,32 @@ final class WakeWordListener {
         let ns = error as NSError
         onResult("", true, "\(ns.domain)#\(ns.code) \(ns.localizedDescription)")
       }
+    }
+  }
+}
+
+/// Ring of the most recent ~1.5 s of mic audio (thread-safe).
+final class PreRoll: Sendable {
+  static let shared = PreRoll()
+  private struct Box: @unchecked Sendable { var buffers: [AVAudioPCMBuffer] = [] }
+  private let box = OSAllocatedUnfairLock(initialState: Box())
+
+  func push(_ buffer: AVAudioPCMBuffer) {
+    box.withLock { b in
+      b.buffers.append(buffer)
+      var frames = b.buffers.reduce(0) { $0 + Int($1.frameLength) }
+      let limit = Int(buffer.format.sampleRate * 1.5)
+      while frames > limit, !b.buffers.isEmpty {
+        frames -= Int(b.buffers.removeFirst().frameLength)
+      }
+    }
+  }
+
+  func drain() -> [AVAudioPCMBuffer] {
+    box.withLock { b in
+      let out = b.buffers
+      b.buffers.removeAll()
+      return out
     }
   }
 }
@@ -491,6 +563,29 @@ enum WakeWord {
     if t.range(of: "^[קכג]ל[או]{0,2}[דט][הי]?$", options: .regularExpression) != nil { return true }
     // Latin: (c|k|g)l + vowel cluster + d(e)
     if t.range(of: "^[ckg]l(a|o|au|ou|aw|oa)+(d|de|t)$", options: .regularExpression) != nil { return true }
+    return false
+  }
+
+  static let stopPhrases: Set<String> = [
+    "לא משנה", "לא", "עזוב", "עזבי", "עצור", "עצרי", "תפסיק", "תפסיקי", "די", "שקט", "בטל", "ביטול", "סטופ",
+    "stop", "never mind", "nevermind", "cancel", "forget it", "shut up", "quiet", "enough",
+  ]
+
+  /// The whole phrase is a cancel word.
+  static func isStopPhrase(_ text: String) -> Bool {
+    let t = normalize(text).trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?").union(.whitespacesAndNewlines))
+    return stopPhrases.contains(t)
+  }
+
+  /// The last one or two words are a cancel word (barge-in while talking).
+  static func endsWithStopPhrase(_ text: String) -> Bool {
+    let tokens = text.split(whereSeparator: { $0.isWhitespace || ",.!?:;".contains($0) }).map { normalize(String($0)) }
+    guard let last = tokens.last else { return false }
+    if stopPhrases.contains(last), last != "לא", last != "די" { return true }
+    if tokens.count >= 2 {
+      let two = tokens[tokens.count - 2] + " " + last
+      if stopPhrases.contains(two) { return true }
+    }
     return false
   }
 
@@ -557,8 +652,32 @@ enum Chime {
   static func playError() { tone("error", notes: [(330, 0.12), (0, 0.05), (262, 0.16)], volume: 0.6) }
   /// Timer finished: three notes.
   static func playTimer() { tone("timer", notes: [(988, 0.12), (0, 0.05), (988, 0.12), (0, 0.05), (1318, 0.22)], volume: 0.7) }
+  /// Listening window closed without a question / cancelled: soft falling note.
+  static func playClose() { tone("close", notes: [(784, 0.07), (523, 0.11)], volume: 0.35) }
 
-  private static func tone(_ name: String, notes: [(Double, Double)], volume: Float) {
+  private static var thinkingTask: Task<Void, Never>?
+
+  /// Soft pulse every ~1.2 s while Claude works. Stops on first speech / error.
+  static func startThinking() {
+    stopThinking()
+    DiagLog.log("chime: thinking loop on")
+    thinkingTask = Task {
+      try? await Task.sleep(for: .milliseconds(700))
+      while !Task.isCancelled {
+        tone("pulse", notes: [(660, 0.05), (0, 0.02), (660, 0.05)], volume: 0.18, haptic: false, log: false)
+        try? await Task.sleep(for: .milliseconds(1200))
+      }
+    }
+  }
+
+  static func stopThinking() {
+    guard thinkingTask != nil else { return }
+    thinkingTask?.cancel()
+    thinkingTask = nil
+    DiagLog.log("chime: thinking loop off")
+  }
+
+  private static func tone(_ name: String, notes: [(Double, Double)], volume: Float, haptic: Bool = true, log: Bool = true) {
     let data = cache[name] ?? {
       let d = render(notes)
       cache[name] = d
@@ -572,8 +691,10 @@ enum Chime {
     players.removeAll { !$0.isPlaying }
     players.append(p)
     let ok = p.play()
-    DiagLog.log("chime: \(name) \(ok ? "playing" : "FAILED") via \(AVAudioSession.sharedInstance().currentRoute.outputs.first?.portName ?? "?")")
-    UIImpactFeedbackGenerator(style: name == "error" ? .heavy : .light).impactOccurred()
+    if log || !ok {
+      DiagLog.log("chime: \(name) \(ok ? "playing" : "FAILED") via \(AVAudioSession.sharedInstance().currentRoute.outputs.first?.portName ?? "?")")
+    }
+    if haptic { UIImpactFeedbackGenerator(style: name == "error" ? .heavy : .light).impactOccurred() }
   }
 
   /// 16 kHz mono 16-bit sine notes with a short fade so they don't click.

@@ -1,7 +1,8 @@
 //
 // AssistantViewModel.swift
-// Voice loop: wake word / tap → listen → (grab glasses frame) → Claude →
-// speak in the ear → short follow-up window → back to wake-word listening.
+// The "Hey Meta"-style loop, with Claude: wake word → instant tone → speak →
+// thinking cue → streamed answer → short follow-up window → back to passive
+// listening. Interruptible at any time ("קלוד …" or a stop phrase).
 //
 
 import AVFoundation
@@ -37,7 +38,7 @@ final class AssistantViewModel {
 
   @ObservationIgnored private let input = SpeechInput()
   @ObservationIgnored private let wake = WakeWordListener()
-  @ObservationIgnored private var tapObservers: [NSObjectProtocol] = []
+  @ObservationIgnored private var observers: [NSObjectProtocol] = []
   @ObservationIgnored private var listeningFromTap = false
   @ObservationIgnored private var history: [ChatTurn] = []
   @ObservationIgnored private var frameProvider: @MainActor () -> UIImage? = { nil }
@@ -47,9 +48,14 @@ final class AssistantViewModel {
   @ObservationIgnored private var errorClearTask: Task<Void, Never>?
   @ObservationIgnored private var watchdogTask: Task<Void, Never>?
   @ObservationIgnored private var phaseSince = Date()
+  @ObservationIgnored private var askTask: Task<Void, Never>?
+  @ObservationIgnored private var fillerTask: Task<Void, Never>?
+  @ObservationIgnored private var inBackground = false
   /// Streaming answer: text not yet cut into a sentence for TTS.
   @ObservationIgnored private var pendingSpeech = ""
   @ObservationIgnored private var sentencesSpoken = 0
+
+  // MARK: - Setup
 
   func attach(
     frameProvider: @escaping @MainActor () -> UIImage?,
@@ -65,38 +71,55 @@ final class AssistantViewModel {
     wake.onRaw = { [weak self] text in self?.ambientText = text }
     wake.onStatus = { [weak self] text in self?.wakeStatus = text }
     wake.onWake = { [weak self] in
-      self?.answerText = ""
-      self?.errorText = nil
-      self?.heardText = "…"
-      self?.wakeStatus = "שמעתי \"קלוד\" — מקשיב לשאלה"
+      guard let self else { return }
+      if self.phase != .idle {
+        // Barge-in: a new "קלוד …" while thinking / talking.
+        self.cancelCurrent(reason: "wake word while \(self.phase)", chime: false, restartWake: false)
+      }
+      self.answerText = ""
+      self.errorText = nil
+      self.heardText = "…"
+      self.wakeStatus = "שמעתי \"קלוד\" — מקשיב לשאלה"
       Chime.play()
     }
     wake.onCommand = { [weak self] text in
       guard let self else { return }
       self.wakeActive = false
-      Task { await self.ask(text) }
+      self.askTask = Task { await self.ask(text) }
     }
     wake.onWakeOnly = { [weak self] in
       guard let self else { return }
       self.wakeActive = false
       Task { await self.startListening(prompt: "כן?") }
     }
+    wake.onStop = { [weak self] in
+      self?.cancelCurrent(reason: "stop phrase", chime: true, restartWake: true)
+    }
 
     let nc = NotificationCenter.default
-    tapObservers.append(nc.addObserver(forName: .glassesTapPause, object: nil, queue: .main) { [weak self] _ in
+    observers.append(nc.addObserver(forName: .glassesTapPause, object: nil, queue: .main) { [weak self] _ in
       MainActor.assumeIsolated { self?.handleGlassesTap(resumed: false) }
     })
-    tapObservers.append(nc.addObserver(forName: .glassesTapResume, object: nil, queue: .main) { [weak self] _ in
+    observers.append(nc.addObserver(forName: .glassesTapResume, object: nil, queue: .main) { [weak self] _ in
       MainActor.assumeIsolated { self?.handleGlassesTap(resumed: true) }
     })
-    tapObservers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-      MainActor.assumeIsolated { self?.resumeWakeListening() }
-    })
-    tapObservers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+    observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
       MainActor.assumeIsolated {
-        DiagLog.log("app: background — releasing the microphone")
-        self?.wake.releaseEngine()
-        self?.wakeActive = false
+        guard let self else { return }
+        self.inBackground = false
+        DiagLog.log("app: active")
+        self.resumeWakeListening()
+      }
+    })
+    observers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.inBackground = true
+        if AssistantSettings.shared.backgroundListening, self.sessionReady {
+          DiagLog.log("app: background — keeps listening (glasses connected, setting on)")
+        } else {
+          self.releaseMic(reason: "app to background")
+        }
       }
     })
 
@@ -117,12 +140,23 @@ final class AssistantViewModel {
     if ready {
       resumeWakeListening()
     } else {
-      wake.releaseEngine()
-      wakeActive = false
-      if phase == .listening { input.cancel(); setPhase(.idle) }
+      cancelCurrent(reason: "session ended", chime: false, restartWake: false)
+      releaseMic(reason: "session ended")
       wakeStatus = "התחל סשן כדי לדבר עם Claude"
     }
   }
+
+  /// Stops every engine and recogniser and deactivates the audio session so
+  /// the orange microphone indicator goes away.
+  private func releaseMic(reason: String) {
+    input.cancel()
+    wake.releaseEngine(reason: reason)
+    wakeActive = false
+    if phase == .listening { setPhase(.idle) }
+    if phase == .idle { AudioRoute.deactivate(reason: reason) }
+  }
+
+  // MARK: - Watchdog
 
   /// If anything leaves the pipeline stuck outside idle, reset it.
   private func startWatchdog() {
@@ -134,13 +168,9 @@ final class AssistantViewModel {
         let stuck = Date().timeIntervalSince(self.phaseSince)
         if self.phase != .idle, stuck > 45 {
           DiagLog.log("watchdog: phase \(self.phase) for \(Int(stuck)) s — resetting")
-          self.input.cancel()
-          SpeechOutput.shared.stopAll()
-          self.followUpOpen = false
-          self.setPhase(.idle)
+          self.cancelCurrent(reason: "watchdog", chime: false, restartWake: true)
           self.showError("האפליקציה נתקעה ואופסה — נסה שוב")
-          self.resumeWakeListening()
-        } else if self.phase == .idle, self.sessionReady, self.wakeEnabled, self.hasKey, !self.wake.isRunning, stuck > 10 {
+        } else if self.phase == .idle, self.canListen, !self.wake.isRunning, stuck > 10 {
           DiagLog.log("watchdog: idle but not listening — restarting the wake listener")
           self.resumeWakeListening()
         }
@@ -148,10 +178,19 @@ final class AssistantViewModel {
     }
   }
 
-  private func setPhase(_ p: Phase) {
-    if p != phase { phaseSince = Date() }
-    phase = p
+  private var canListen: Bool {
+    sessionReady && wakeEnabled && hasKey && (!inBackground || AssistantSettings.shared.backgroundListening)
   }
+
+  private func setPhase(_ p: Phase) {
+    guard p != phase else { return }
+    DiagLog.log("state: \(phase) → \(p)")
+    phaseSince = Date()
+    phase = p
+    wake.conversationActive = (p == .thinking || p == .speaking)
+  }
+
+  // MARK: - Wake listening
 
   /// Tap the glasses touchpad: first tap starts listening, second tap sends.
   private func handleGlassesTap(resumed: Bool) {
@@ -168,9 +207,17 @@ final class AssistantViewModel {
 
   func setWakeWord(_ on: Bool) {
     AssistantSettings.shared.wakeWordEnabled = on
-    if on { resumeWakeListening() } else { wake.releaseEngine(); wakeActive = false }
+    wakeEnabled = on
+    if on {
+      resumeWakeListening()
+    } else {
+      cancelCurrent(reason: "wake toggle off", chime: false, restartWake: false)
+      releaseMic(reason: "wake toggle off")
+    }
   }
 
+  /// Starts (or keeps) the wake listener. During thinking/speaking it runs in
+  /// barge-in mode (stop phrases + new "קלוד" questions, echo filtered).
   private func resumeWakeListening() {
     wakeEnabled = AssistantSettings.shared.wakeWordEnabled
     guard wakeEnabled else {
@@ -187,16 +234,18 @@ final class AssistantViewModel {
       wakeActive = false
       return
     }
-    guard phase == .idle, !wake.isRunning else {
-      DiagLog.log("state: wake not (re)started — phase=\(phase) wakeRunning=\(wake.isRunning)")
+    guard !inBackground || AssistantSettings.shared.backgroundListening else { return }
+    guard phase != .listening, !wake.isRunning else {
+      if phase == .listening { DiagLog.log("state: wake not started — push-to-talk window is open") }
       return
     }
-    wakeStatus = "מפעיל האזנה…"
-    DiagLog.log("state: → wake listening")
+    wake.conversationActive = (phase == .thinking || phase == .speaking)
+    if phase == .idle { wakeStatus = "מפעיל האזנה…" }
+    DiagLog.log("state: → wake listening (barge-in=\(wake.conversationActive))")
     Task {
       do {
         try await wake.start(language: AssistantSettings.shared.listenLanguage)
-        wakeActive = wake.isRunning
+        wakeActive = wake.isRunning && phase == .idle
       } catch {
         wakeActive = false
         wakeStatus = "ההאזנה לא הופעלה: \(error.localizedDescription)"
@@ -204,8 +253,9 @@ final class AssistantViewModel {
     }
   }
 
+  /// Hands the mic to push-to-talk / follow-up (keeps the Bluetooth route up).
   private func pauseWakeListening() {
-    wake.stop(keepRoute: true)
+    wake.stop(keepRoute: true, reason: "handing mic to push-to-talk")
     wakeActive = false
   }
 
@@ -215,9 +265,15 @@ final class AssistantViewModel {
     if AssistantSettings.shared.locationEnabled { LocationContext.shared.start() } else { LocationContext.shared.stop() }
     wakeEnabled = AssistantSettings.shared.wakeWordEnabled
     guard phase == .idle else { return }
-    if wakeEnabled { pauseWakeListening() } else { wake.releaseEngine(); wakeActive = false }
+    if wakeEnabled {
+      wake.stop(keepRoute: true, reason: "settings changed")
+    } else {
+      releaseMic(reason: "wake disabled in settings")
+    }
     resumeWakeListening()
   }
+
+  // MARK: - User controls
 
   /// Tap once to start listening, tap again to send.
   func toggleTalk() {
@@ -226,11 +282,8 @@ final class AssistantViewModel {
     case .listening:
       followUpCancelled = true
       Task { await finishAndAsk() }
-    case .speaking:
-      SpeechOutput.shared.stopAll()
-      setPhase(.idle)
-      resumeWakeListening()
-    case .thinking: break
+    case .speaking, .thinking:
+      cancelCurrent(reason: "user tapped stop", chime: true, restartWake: true)
     }
   }
 
@@ -239,6 +292,29 @@ final class AssistantViewModel {
     heardText = ""
     answerText = ""
     errorText = nil
+  }
+
+  /// Aborts whatever is going on (request, speech, windows) and returns to
+  /// passive wake listening.
+  private func cancelCurrent(reason: String, chime: Bool, restartWake: Bool) {
+    DiagLog.log("state: cancel (\(reason)) from \(phase)")
+    askTask?.cancel()
+    askTask = nil
+    fillerTask?.cancel()
+    fillerTask = nil
+    Chime.stopThinking()
+    SpeechOutput.shared.stopAll()
+    followUpCancelled = true
+    followUpOpen = false
+    input.cancel()
+    pendingSpeech = ""
+    if chime { Chime.playClose() }
+    setPhase(.idle)
+    if restartWake {
+      // Fresh recognition request so the old transcript is gone.
+      wake.stop(keepRoute: true, reason: "cancel → fresh request")
+      resumeWakeListening()
+    }
   }
 
   private func showError(_ text: String) {
@@ -252,6 +328,8 @@ final class AssistantViewModel {
       self?.errorText = nil
     }
   }
+
+  // MARK: - Push-to-talk / follow-up windows
 
   /// Starts push-to-talk listening. `prompt` (e.g. "כן?") is spoken first and
   /// allowed to finish — it must not be cut off by stopping the speech queue.
@@ -270,9 +348,10 @@ final class AssistantViewModel {
       setPhase(.listening)
       try await input.start(language: AssistantSettings.shared.listenLanguage)
       Chime.play()
+      DiagLog.log("state: push-to-talk window open (hands-free=\(prompt != nil))")
       if prompt != nil {
         // Hands-free: nobody will tap "send", so end on silence.
-        Task { await self.finishOnSilence(maxSeconds: 10, minSpeechGap: 1.0) }
+        Task { await self.finishOnSilence(maxSeconds: 12, minSpeechGap: 1.0) }
       }
     } catch {
       setPhase(.idle)
@@ -281,25 +360,34 @@ final class AssistantViewModel {
     }
   }
 
-  /// Waits until the speaker pauses (or nothing is said), then sends.
+  /// Waits until the speaker pauses (or nothing is said), then sends. Stop
+  /// phrases cancel; silence for `idleTimeoutSeconds` closes the window.
   private func finishOnSilence(maxSeconds: Double, minSpeechGap: Double) async {
     let deadline = Date().addingTimeInterval(maxSeconds)
+    let idleLimit = AssistantSettings.shared.idleTimeoutSeconds
     followUpCancelled = false
+    var text = ""
     while phase == .listening, !followUpCancelled, Date() < deadline {
-      try? await Task.sleep(for: .milliseconds(200))
-      let text = input.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+      try? await Task.sleep(for: .milliseconds(150))
+      text = input.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
       let gap = Date().timeIntervalSince(input.lastChange)
+      if WakeWord.isStopPhrase(text), gap > 0.6 {
+        DiagLog.log("state: stop phrase in window '\(text)'")
+        cancelCurrent(reason: "stop phrase in window", chime: true, restartWake: true)
+        return
+      }
       if !text.isEmpty, gap > minSpeechGap { break }
-      if text.isEmpty, gap > 5 { break }
+      if text.isEmpty, gap > idleLimit { break }
     }
     guard phase == .listening, !followUpCancelled else { return }
-    if input.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      // Nothing was said: close quietly (no need to wait for the recognizer).
+    if text.isEmpty {
+      // Nothing was said: close quietly and go back to passive listening.
+      DiagLog.log("state: window closed — no speech for \(Int(idleLimit)) s (follow-up=\(followUpOpen))")
       input.cancel()
-      setPhase(.idle)
-      if !followUpOpen { showError("לא שמעתי כלום — נסה שוב.") }
       followUpOpen = false
       heardText = ""
+      Chime.playClose()
+      setPhase(.idle)
       resumeWakeListening()
       return
     }
@@ -310,48 +398,72 @@ final class AssistantViewModel {
     var question = await input.finish()
     // "קלוד, …" said inside the follow-up / push-to-talk window: drop the name.
     if let tail = WakeWord.commandAfterWakeWord(in: question), !tail.isEmpty { question = tail }
-    DiagLog.log("state: captured (ptt/follow-up=\(followUpOpen)) '\(question.prefix(40))'")
+    DiagLog.log("state: captured (follow-up=\(followUpOpen)) '\(question.prefix(40))'")
     heardText = question
-    guard !question.isEmpty else {
+    guard !question.isEmpty, !WakeWord.isStopPhrase(question) else {
       setPhase(.idle)
-      if !followUpOpen { showError("לא שמעתי כלום — נסה שוב.") }
+      if !followUpOpen, question.isEmpty { showError("לא שמעתי כלום — נסה שוב.") } else { Chime.playClose() }
       followUpOpen = false
       resumeWakeListening()
       return
     }
     followUpOpen = false
-    await ask(question)
+    askTask = Task { await ask(question) }
   }
+
+  // MARK: - Ask Claude
 
   private func ask(_ question: String) async {
     let endOfSpeech = Date()
-    pauseWakeListening()
     heardText = question
     errorText = nil
     setPhase(.thinking)
-    // Instant acknowledgement: the question was captured, Claude is thinking.
+    // Instant acknowledgement, then a soft pulse while Claude works.
     Chime.playDone()
+    Chime.startThinking()
     SpeechOutput.shared.beginTrace(at: endOfSpeech)
     DiagLog.log("latency: question captured '\(question.prefix(40))' input=\(AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? "?")")
+    // Barge-in listener (stop phrases / new "קלוד") while we work.
+    resumeWakeListening()
+
     let settings = AssistantSettings.shared
     let jpeg = settings.useCamera ? frameProvider().flatMap { ClaudeClient.jpeg($0) } : nil
-    let client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue, tools: toolBox)
+    var client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue, tools: toolBox)
     pendingSpeech = ""
     sentencesSpoken = 0
     answerText = ""
-    var firstToken: Date?
+    let progress = AskProgress()
+    client.onTool = { [weak self] name in
+      guard let self, !progress.gotToken, !progress.fillerSaid else { return }
+      // A tool (web search, calendar…) is running: after 3 s say we're on it.
+      self.fillerTask?.cancel()
+      self.fillerTask = Task { [weak self] in
+        try? await Task.sleep(for: .seconds(3))
+        guard let self, !Task.isCancelled, self.phase == .thinking, !progress.gotToken, !progress.fillerSaid else { return }
+        progress.fillerSaid = true
+        DiagLog.log("state: filler after slow tool \(name)")
+        SpeechOutput.shared.enqueue("רגע, בודק…")
+        await SpeechOutput.shared.waitUntilIdle(maxSeconds: 6)
+        if self.phase == .thinking, !progress.gotToken { Chime.startThinking() }
+      }
+    }
     do {
       let answer = try await client.ask(history: history, question: question, imageJPEG: jpeg) { [weak self] delta in
-        guard let self else { return }
-        if firstToken == nil {
-          firstToken = Date()
+        guard let self, !Task.isCancelled else { return }
+        if !progress.gotToken {
+          progress.gotToken = true
           DiagLog.log("latency: first token \(Int(Date().timeIntervalSince(endOfSpeech) * 1000)) ms after end of speech")
+          self.fillerTask?.cancel()
+          Chime.stopThinking()
           self.setPhase(.speaking)
         }
         self.answerText += delta
         self.pendingSpeech += delta
         self.flushSentences(final: false)
       }
+      guard !Task.isCancelled else { return }
+      fillerTask?.cancel()
+      Chime.stopThinking()
       answerText = answer
       flushSentences(final: true)
       if sentencesSpoken == 0 { SpeechOutput.shared.enqueue(answer) }
@@ -360,19 +472,25 @@ final class AssistantViewModel {
       if history.count > 12 { history.removeFirst(history.count - 12) }
       setPhase(.speaking)
       await waitForSpeech()
+      guard !Task.isCancelled, phase == .speaking else { return }  // cancelled / barged in
       DiagLog.log("latency: answer fully spoken \(Int(Date().timeIntervalSince(endOfSpeech) * 1000)) ms after end of speech")
-      guard phase == .speaking else { return }  // stopped by the user
       setPhase(.idle)
       if settings.followUpEnabled {
         await listenForFollowUp()
         return
       }
+    } catch is CancellationError {
+      DiagLog.log("claude: request cancelled")
+      return
     } catch {
+      guard !Task.isCancelled else { return }
       DiagLog.log("claude: failed — \(error)")
+      fillerTask?.cancel()
+      Chime.stopThinking()
       SpeechOutput.shared.stopAll()
       setPhase(.idle)
       showError(error.localizedDescription)
-      SpeechOutput.shared.enqueue("הייתה תקלה, נסה שוב.")
+      SpeechOutput.shared.enqueue("לא הצלחתי, נסה שוב.")
     }
     resumeWakeListening()
   }
@@ -400,7 +518,7 @@ final class AssistantViewModel {
   }
 
   /// Index just after the first sentence end (. ! ? : or newline followed by
-  /// whitespace/end) once at least `minChars` have accumulated.
+  /// whitespace) once at least `minChars` have accumulated.
   static func sentenceBoundary(in text: String, minChars: Int) -> String.Index? {
     guard text.count >= minChars else { return nil }
     var i = text.startIndex
@@ -409,11 +527,9 @@ final class AssistantViewModel {
       let c = text[i]
       let next = text.index(after: i)
       seen += 1
-      if c == "\n" && seen >= minChars { return next }
-      if ".!?:؟".contains(c), seen >= minChars {
-        // ". " or end — but not a decimal like 3.5 or an abbreviation like 925.5
-        if next == text.endIndex { return nil }  // wait for more: might be "3." then digits
-        if text[next].isWhitespace { return next }
+      if c == "\n", seen >= minChars { return next }
+      if ".!?:؟".contains(c), seen >= minChars, next < text.endIndex, text[next].isWhitespace {
+        return next  // "3.5" has no space after the dot, so decimals survive
       }
       i = next
     }
@@ -423,6 +539,7 @@ final class AssistantViewModel {
   /// A few seconds after an answer, listen for a follow-up without the wake word.
   private func listenForFollowUp() async {
     DiagLog.log("state: → follow-up window")
+    pauseWakeListening()
     followUpOpen = true
     wakeStatus = "אפשר להמשיך לדבר בלי \"קלוד\"…"
     input.onPartial = { [weak self] text in self?.heardText = text }
@@ -436,15 +553,22 @@ final class AssistantViewModel {
       resumeWakeListening()
       return
     }
-    await finishOnSilence(maxSeconds: 8, minSpeechGap: 0.9)
+    await finishOnSilence(maxSeconds: 10, minSpeechGap: 0.9)
   }
 
   private func waitForSpeech() async {
     // Poll the queue lightly; speech is a few seconds at most.
     try? await Task.sleep(for: .milliseconds(300))
     let deadline = Date().addingTimeInterval(90)
-    while SpeechOutput.shared.isBusy, phase == .speaking, Date() < deadline {
-      try? await Task.sleep(for: .milliseconds(200))
+    while SpeechOutput.shared.isBusy, phase == .speaking, !Task.isCancelled, Date() < deadline {
+      try? await Task.sleep(for: .milliseconds(150))
     }
   }
+}
+
+/// Mutable flags shared between the streaming callbacks of one question.
+@MainActor
+final class AskProgress {
+  var gotToken = false
+  var fillerSaid = false
 }
