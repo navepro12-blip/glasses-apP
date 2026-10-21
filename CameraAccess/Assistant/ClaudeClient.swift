@@ -358,7 +358,8 @@ struct ClaudeClient {
     }
     var body: [String: Any] = [
       "model": model,
-      "max_tokens": 400,
+      "max_tokens": 1024,
+      "thinking": ["type": "disabled"],
       "stream": true,
       "system": Self.systemPrompt + "\n\n" + Self.contextBlock,
       "messages": messages,

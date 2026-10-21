@@ -569,7 +569,19 @@ enum WakeWord {
   static let stopPhrases: Set<String> = [
     "לא משנה", "לא", "עזוב", "עזבי", "עצור", "עצרי", "תפסיק", "תפסיקי", "די", "שקט", "בטל", "ביטול", "סטופ",
     "stop", "never mind", "nevermind", "cancel", "forget it", "shut up", "quiet", "enough",
+    "תפסיקי להקשיב", "תפסיק להקשיב", "מספיק", "זהו", "ביי", "יאללה ביי", "לילה טוב",
   ]
+
+  /// "אוקיי תודה עצור", "תודה זהו", "טוב תפסיקי" — a short utterance that ends the
+  /// conversation (used in the follow-up window, where anything else is a question).
+  static func endsConversation(_ text: String) -> Bool {
+    let tokens = text.split(whereSeparator: { $0.isWhitespace || ",.!?:;".contains($0) }).map { normalize(String($0)) }
+    guard !tokens.isEmpty, tokens.count <= 6 else { return false }
+    let closers: Set<String> = ["עצור", "עצרי", "תפסיק", "תפסיקי", "די", "מספיק", "זהו", "ביי", "שקט", "stop", "bye", "סטופ", "בטל"]
+    if tokens.contains(where: { closers.contains($0) }) { return true }
+    let joined = tokens.joined(separator: " ")
+    return ["תודה", "תודה רבה", "אוקיי תודה", "טוב תודה", "סבבה תודה", "לא משנה", "לא צריך", "זה הכל", "זה הכול"].contains(joined)
+  }
 
   /// The whole phrase is a cancel word.
   static func isStopPhrase(_ text: String) -> Bool {

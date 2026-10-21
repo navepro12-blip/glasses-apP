@@ -67,8 +67,10 @@ final class AssistantViewModel {
   func attach(
     frameProvider: @escaping @MainActor () -> UIImage?,
     stillProvider: @escaping @MainActor () async -> UIImage?,
+    quickSnapshot: @escaping @MainActor () async -> UIImage?,
     liveControl: @escaping @MainActor (Bool) async -> Bool
   ) {
+    toolBox.quickSnapshot = quickSnapshot
     self.frameProvider = frameProvider
     self.liveControl = liveControl
     toolBox.frameProvider = frameProvider
@@ -411,7 +413,7 @@ final class AssistantViewModel {
     if let tail = WakeWord.commandAfterWakeWord(in: question), !tail.isEmpty { question = tail }
     DiagLog.log("state: captured (follow-up=\(followUpOpen)) '\(question.prefix(40))'")
     heardText = question
-    guard !question.isEmpty, !WakeWord.isStopPhrase(question) else {
+    guard !question.isEmpty, !WakeWord.isStopPhrase(question), !WakeWord.endsConversation(question) else {
       setPhase(.idle)
       if !followUpOpen, question.isEmpty { showError("לא שמעתי כלום — נסה שוב.") } else { Chime.playClose() }
       followUpOpen = false
@@ -442,7 +444,7 @@ final class AssistantViewModel {
     if liveMode { liveLastActivity = Date() }
     if jpeg == nil, settings.useCamera, Self.needsVision(question) {
       DiagLog.log("snapshot: visual question, grabbing a frame")
-      jpeg = await toolBox.stillProvider().flatMap { ClaudeClient.jpeg($0, maxSide: 1280) }
+      jpeg = await toolBox.quickSnapshot().flatMap { ClaudeClient.jpeg($0, maxSide: 1280) }
       guard !Task.isCancelled else { return }
     }
     var client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue, tools: toolBox)
@@ -565,6 +567,11 @@ final class AssistantViewModel {
 
   /// A few seconds after an answer, listen for a follow-up without the wake word.
   private func listenForFollowUp() async {
+    guard sessionReady else {
+      DiagLog.log("state: no follow-up — session not ready")
+      setPhase(.idle)
+      return
+    }
     DiagLog.log("state: → follow-up window")
     pauseWakeListening()
     followUpOpen = true

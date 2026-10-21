@@ -186,8 +186,9 @@ final class CameraViewModel {
   /// "What am I looking at": grab one good frame even when the preview is off —
   /// starts the glasses camera, waits for the first frames, takes a still,
   /// and stops the camera again if we started it.
-  func snapshotForAI() async -> UIImage? {
+  func snapshotForAI(fullRes: Bool) async -> UIImage? {
     if isStreaming {
+      if !fullRes, let frame = latestFrame ?? currentVideoFrame { return frame }
       return await captureStillForAI() ?? latestFrame ?? currentVideoFrame
     }
     guard let session = deviceSession, session.state == .started, camera == nil else {
@@ -212,9 +213,9 @@ final class CameraViewModel {
       streamOwnedByAI = false
       return latestFrame
     }
-    // Let auto-exposure settle, then a full-resolution still.
-    try? await Task.sleep(for: .milliseconds(450))
-    let still = await captureStillForAI()
+    // Let auto-exposure settle; a full-resolution still only for "look closer".
+    try? await Task.sleep(for: .milliseconds(fullRes ? 450 : 350))
+    let still = fullRes ? await captureStillForAI() : nil
     let image = still ?? latestFrame
     DiagLog.log("snapshot: ready in \(Int(Date().timeIntervalSince(t0) * 1000)) ms (still=\(still != nil))")
     if streamOwnedByAI, !liveStreamActive { stopStreaming() }

@@ -84,7 +84,8 @@ struct CameraView: View {
 
         AssistantPanel(
           frameProvider: { [viewModel] in viewModel.isStreaming ? (viewModel.latestFrame ?? viewModel.currentVideoFrame) : nil },
-          stillProvider: { [viewModel] in await viewModel.snapshotForAI() },
+          stillProvider: { [viewModel] in await viewModel.snapshotForAI(fullRes: true) },
+          quickSnapshot: { [viewModel] in await viewModel.snapshotForAI(fullRes: false) },
           liveControl: { [viewModel] on in await viewModel.setLiveStream(on) },
           sessionReady: viewModel.sessionState == .started
         )

@@ -9,6 +9,7 @@ import UIKit
 struct AssistantPanel: View {
   let frameProvider: @MainActor () -> UIImage?
   let stillProvider: @MainActor () async -> UIImage?
+  let quickSnapshot: @MainActor () async -> UIImage?
   let liveControl: @MainActor (Bool) async -> Bool
   let sessionReady: Bool
   @State private var chat = LiveChatReader.shared
@@ -126,7 +127,7 @@ struct AssistantPanel: View {
       }
     }
     .onAppear {
-      vm.attach(frameProvider: frameProvider, stillProvider: stillProvider, liveControl: liveControl)
+      vm.attach(frameProvider: frameProvider, stillProvider: stillProvider, quickSnapshot: quickSnapshot, liveControl: liveControl)
       vm.setSessionReady(sessionReady)
     }
     .onChange(of: sessionReady) { _, ready in vm.setSessionReady(ready) }

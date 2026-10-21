@@ -14,6 +14,8 @@ import UIKit
 final class ToolBox {
   var frameProvider: @MainActor () -> UIImage? = { nil }
   var stillProvider: @MainActor () async -> UIImage? = { nil }
+  /// Fast single frame (no full-resolution still) for ordinary visual questions.
+  var quickSnapshot: @MainActor () async -> UIImage? = { nil }
   var liveModeControl: @MainActor (Bool) async -> String = { _ in "unavailable" }
 
   /// Returns tool_result content (a string or content blocks).
