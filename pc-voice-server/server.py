@@ -440,6 +440,15 @@ if __name__ == "__main__":
     print("Loading the Hebrew voice model (first run downloads ~300 MB)...")
     print("Device:", "GPU (CUDA)" if _GPU else "CPU — run gpu.bat once for a much faster voice")
     with _lock:
+        # Warm up the resampler/FLAC path too — librosa's first call takes
+        # several seconds, which made the phone's first request time out.
+        try:
+            import librosa
+
+            librosa.resample(np.zeros(4410, dtype=np.float32), orig_sr=44100, target_sr=24000)
+            sf.write(io.BytesIO(), np.zeros(2400, dtype=np.float32), 24000, format="FLAC", subtype="PCM_16")
+        except Exception as e:
+            print(f"[warmup] resample/flac: {e}")
         for v in available_voices():  # warm up every voice + fetch Hebrew G2P weights
             t0 = time.time()
             synth("שלום, אני מוכן.", "he", v)
