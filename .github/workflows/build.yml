@@ -22,12 +22,18 @@ jobs:
           xcodebuild -version
       - name: Build
         run: |
+          set +e
           xcodebuild -project CameraAccess.xcodeproj -scheme CameraAccess \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build | tail -80
-          test ${PIPESTATUS[0]} -eq 0
+            build > build.log 2>&1
+          STATUS=$?
+          tail -40 build.log
+          grep -E "error:|warning: .*(Sendable|actor|isolat)" build.log | sort -u | head -40 | while IFS= read -r line; do
+            echo "::error::${line//%/%25}"
+          done
+          exit $STATUS
       - name: Package IPA
         run: |
           APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
