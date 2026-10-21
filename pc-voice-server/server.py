@@ -163,6 +163,8 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "noa"
     speed: float = 1.0
+    format: str = "wav"  # "flac" = ~4x smaller over Wi-Fi
+    sample_rate: int = 0  # e.g. 24000 to downsample before sending
 
 
 @app.get("/health")
@@ -175,13 +177,28 @@ def tts(req: TTSRequest):
     if not req.text.strip():
         raise HTTPException(400, "empty text")
     text, lang = prepare(req.text[:2000])
-    t0 = time.time()
+    t_arrive = time.time()
     with _lock:
+        t0 = time.time()
         samples, sr = synth(text, lang, req.voice, max(0.5, min(2.0, req.speed)))
+    t_synth = time.time() - t0
+    samples = np.asarray(samples, dtype=np.float32)
+    if req.sample_rate and req.sample_rate < sr:
+        import librosa
+
+        samples = librosa.resample(samples, orig_sr=sr, target_sr=req.sample_rate)
+        sr = req.sample_rate
     buf = io.BytesIO()
-    sf.write(buf, np.asarray(samples, dtype=np.float32), sr, format="WAV", subtype="PCM_16")
-    print(f"[tts] {len(req.text)} chars, voice={req.voice}, {time.time() - t0:.2f}s")
-    return Response(content=buf.getvalue(), media_type="audio/wav")
+    if req.format == "flac":
+        sf.write(buf, samples, sr, format="FLAC", subtype="PCM_16")
+        media = "audio/flac"
+    else:
+        sf.write(buf, samples, sr, format="WAV", subtype="PCM_16")
+        media = "audio/wav"
+    data = buf.getvalue()
+    print(f"[tts] {len(req.text)} chars, voice={req.voice}, synth {t_synth:.2f}s, "
+          f"queued {t0 - t_arrive:.2f}s, {len(data) // 1024} KB {req.format}")
+    return Response(content=data, media_type=media)
 
 
 # ---------------------------------------------------------------- media ----

@@ -218,8 +218,11 @@ final class SpeechOutput: NSObject {
   }
 
   private func play(_ data: Data) async {
-    guard let p = try? AVAudioPlayer(data: data) else {
-      DiagLog.log("tts: AVAudioPlayer could not decode the audio")
+    let isFLAC = data.prefix(4) == Data("fLaC".utf8)
+    guard let p = (try? AVAudioPlayer(data: data))
+      ?? (isFLAC ? try? AVAudioPlayer(data: data, fileTypeHint: "org.xiph.flac") : nil)
+    else {
+      DiagLog.log("tts: AVAudioPlayer could not decode the audio (flac=\(isFLAC))")
       return
     }
     player = p
@@ -365,7 +368,11 @@ enum PCVoiceTTS {
     // rather fall back than keep him waiting.
     request.timeoutInterval = 6
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "voice": voice])
+    // FLAC at 24 kHz is ~4x smaller than the WAV — much faster over Wi-Fi.
+    // (Older servers ignore these fields and send WAV, which still plays.)
+    request.httpBody = try JSONSerialization.data(withJSONObject: [
+      "text": text, "voice": voice, "format": "flac", "sample_rate": 24000,
+    ])
     do {
       let (data, response) = try await URLSession.shared.data(for: request)
       let code = (response as? HTTPURLResponse)?.statusCode ?? 0
