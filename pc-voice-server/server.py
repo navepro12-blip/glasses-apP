@@ -38,7 +38,34 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from blue_onnx import BlueTTS
+# ---- GPU (RTX) when available: ~10x faster than CPU for this model ----
+import onnxruntime as ort
+
+try:
+    ort.preload_dlls()  # loads CUDA/cuDNN from the nvidia-* pip wheels if present
+except Exception:
+    pass
+_GPU = "CUDAExecutionProvider" in ort.get_available_providers()
+
+import blue_onnx  # noqa: E402
+
+_orig_load_onnx = blue_onnx.load_onnx
+
+
+def _load_onnx(path, opts, providers):
+    if _GPU:
+        try:
+            return ort.InferenceSession(path, sess_options=opts,
+                                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        except Exception as e:  # missing CUDA DLLs etc. → CPU
+            print(f"[gpu] falling back to CPU: {e}")
+    return _orig_load_onnx(path, opts, providers)
+
+
+blue_onnx.load_onnx = _load_onnx
+from blue_onnx import BlueTTS  # noqa: E402
+
+STEPS = int(os.environ.get("NAVE_TTS_STEPS", "5"))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ONNX_DIR = os.path.join(HERE, "onnx_models")
@@ -81,7 +108,7 @@ def synth(text: str, lang: str, voice: str, speed: float = 1.0):
     from blue_onnx import limit_peak
 
     e = engine()
-    audio, _ = e.tts(text, lang=lang, style=style(voice), total_step=5, speed=speed, normalize_text=True)
+    audio, _ = e.tts(text, lang=lang, style=style(voice), total_step=STEPS, speed=speed, normalize_text=True)
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim == 2:
         audio = audio[0]
@@ -362,6 +389,7 @@ def local_ips() -> list[str]:
 
 if __name__ == "__main__":
     print("Loading the Hebrew voice model (first run downloads ~300 MB)...")
+    print("Device:", "GPU (CUDA)" if _GPU else "CPU — run gpu.bat once for a much faster voice")
     with _lock:
         for v in available_voices():  # warm up every voice + fetch Hebrew G2P weights
             t0 = time.time()
