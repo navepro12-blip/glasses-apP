@@ -298,6 +298,16 @@ enum GeminiTTS {
 /// Audio session: play and record over Bluetooth so the glasses are both the
 /// mic (HFP) and the speaker.
 enum AudioRoute {
+  /// The mic's format, waiting briefly while Bluetooth settles (0 Hz = not ready).
+  @MainActor static func validInputFormat(_ node: AVAudioInputNode) async -> AVAudioFormat? {
+    for _ in 0..<8 {
+      let f = node.outputFormat(forBus: 0)
+      if f.sampleRate > 0, f.channelCount > 0 { return f }
+      try? await Task.sleep(for: .milliseconds(250))
+    }
+    return nil
+  }
+
   static func activateForPlayback() {
     configure()
   }

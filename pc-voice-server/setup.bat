@@ -23,7 +23,7 @@ cd BlueTTS
 
 echo Installing Python packages ^(a few minutes^)...
 uv sync || goto :fail
-uv pip install fastapi "uvicorn[standard]" || goto :fail
+uv pip install fastapi "uvicorn[standard]" TikTokLive || goto :fail
 
 echo Downloading the voice model...
 uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models || goto :fail

@@ -82,7 +82,10 @@ struct CameraView: View {
 
         Spacer(minLength: 0)
 
-        AssistantPanel(frameProvider: { [viewModel] in viewModel.currentVideoFrame })
+        AssistantPanel(
+          frameProvider: { [viewModel] in viewModel.currentVideoFrame },
+          stillProvider: { [viewModel] in await viewModel.captureStillForAI() }
+        )
           .padding(.horizontal, 20)
           .padding(.bottom, 4)
 

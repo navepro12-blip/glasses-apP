@@ -21,6 +21,9 @@ final class AssistantViewModel {
   var wakeActive: Bool = false
   /// What the always-on listener hears right now (so you can see it works).
   var ambientText: String = ""
+  /// Diagnostics for hands-free listening (shown when it is enabled).
+  var wakeStatus: String = ""
+  var wakeEnabled: Bool = AssistantSettings.shared.wakeWordEnabled
 
   @ObservationIgnored private let input = SpeechInput()
   @ObservationIgnored private let wake = WakeWordListener()
@@ -28,11 +31,18 @@ final class AssistantViewModel {
   @ObservationIgnored private var listeningFromTap = false
   @ObservationIgnored private var history: [ChatTurn] = []
   @ObservationIgnored private var frameProvider: @MainActor () -> UIImage? = { nil }
+  @ObservationIgnored private let toolBox = ToolBox()
 
-  func attach(frameProvider: @escaping @MainActor () -> UIImage?) {
+  func attach(
+    frameProvider: @escaping @MainActor () -> UIImage?,
+    stillProvider: @escaping @MainActor () async -> UIImage?
+  ) {
     self.frameProvider = frameProvider
+    toolBox.frameProvider = frameProvider
+    toolBox.stillProvider = stillProvider
     wake.onPartial = { [weak self] text in self?.heardText = text }
     wake.onRaw = { [weak self] text in self?.ambientText = text }
+    wake.onStatus = { [weak self] text in self?.wakeStatus = text }
     wake.onWake = { [weak self] in
       self?.answerText = ""
       self?.heardText = "…"
@@ -82,14 +92,24 @@ final class AssistantViewModel {
   }
 
   private func resumeWakeListening() {
-    guard AssistantSettings.shared.wakeWordEnabled, hasKey, phase == .idle, !wake.isRunning else { return }
+    wakeEnabled = AssistantSettings.shared.wakeWordEnabled
+    guard wakeEnabled else {
+      wakeStatus = ""
+      return
+    }
+    guard hasKey else {
+      wakeStatus = "האזנה כבויה: חסר מפתח Anthropic"
+      return
+    }
+    guard phase == .idle, !wake.isRunning else { return }
+    wakeStatus = "מפעיל האזנה…"
     Task {
       do {
         try await wake.start(language: AssistantSettings.shared.listenLanguage)
         wakeActive = true
       } catch {
         wakeActive = false
-        errorText = error.localizedDescription
+        wakeStatus = "ההאזנה לא הופעלה: \(error.localizedDescription)"
       }
     }
   }
@@ -159,7 +179,7 @@ final class AssistantViewModel {
     phase = .thinking
     let settings = AssistantSettings.shared
     let jpeg = settings.useCamera ? frameProvider().flatMap { ClaudeClient.jpeg($0) } : nil
-    let client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue)
+    let client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue, tools: toolBox)
     do {
       let answer = try await client.ask(history: history, question: question, imageJPEG: jpeg)
       answerText = answer

@@ -27,6 +27,10 @@ final class WakeWordListener {
   var onWake: (@MainActor () -> Void)?
 
   private(set) var isRunning = false
+  /// Human-readable state for the on-screen diagnostics line.
+  var onStatus: (@MainActor (String) -> Void)?
+  private var observers: [NSObjectProtocol] = []
+  private var lastBegin = Date.distantPast
   private var language: ListenLanguage = .hebrew
   private let engine = AVAudioEngine()
   private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -42,11 +46,38 @@ final class WakeWordListener {
     guard await SpeechInput.requestAuthorization() else { throw SpeechInput.InputError.notAuthorized }
     self.language = language
     isRunning = true
+    observeAudioChanges()
     try beginRecognition()
+  }
+
+  /// Starting the glasses stream / Bluetooth route changes stop AVAudioEngine
+  /// silently — restart listening whenever that happens.
+  private func observeAudioChanges() {
+    guard observers.isEmpty else { return }
+    let nc = NotificationCenter.default
+    let restart: @Sendable (Notification) -> Void = { [weak self] note in
+      let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap {
+        AVAudioSession.RouteChangeReason(rawValue: $0)
+      }
+      if reason == .categoryChange || reason == .override { return }
+      Task { @MainActor in
+        guard let self, self.isRunning, !self.armed,
+          Date().timeIntervalSince(self.lastBegin) > 2
+        else { return }
+        try? await Task.sleep(for: .milliseconds(600))
+        self.onStatus?("מתחבר מחדש למיקרופון…")
+        try? self.beginRecognition()
+      }
+    }
+    observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil, using: restart))
   }
 
   func stop() {
     isRunning = false
+    observers.forEach { NotificationCenter.default.removeObserver($0) }
+    observers.removeAll()
     silenceTask?.cancel()
     recycleTask?.cancel()
     tearDown()
@@ -59,6 +90,7 @@ final class WakeWordListener {
       recognizer.isAvailable
     else { throw SpeechInput.InputError.unavailable }
 
+    lastBegin = Date()
     armed = false
     command = ""
     generation += 1
@@ -71,9 +103,29 @@ final class WakeWordListener {
     request = req
 
     let input = engine.inputNode
-    Self.installTap(on: input, format: input.outputFormat(forBus: 0), request: req)
+    let format = input.outputFormat(forBus: 0)
+    // While Bluetooth is switching the mic reports 0 Hz — installing a tap
+    // then crashes the app. Retry shortly instead.
+    guard format.sampleRate > 0, format.channelCount > 0 else {
+      request = nil
+      onStatus?("ממתין למיקרופון…")
+      Task { [weak self] in
+        try? await Task.sleep(for: .milliseconds(800))
+        guard let self, self.isRunning else { return }
+        try? self.beginRecognition()
+      }
+      return
+    }
+    Self.installTap(on: input, format: format, request: req)
     engine.prepare()
-    try engine.start()
+    do {
+      try engine.start()
+    } catch {
+      onStatus?("שגיאת מיקרופון: \(error.localizedDescription)")
+      throw error
+    }
+    let route = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? "?"
+    onStatus?("מקשיב דרך: \(route)")
 
     task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, ended in
       Task { @MainActor in
@@ -95,6 +147,8 @@ final class WakeWordListener {
 
   private func handle(_ text: String) {
     onRaw?(String(text.suffix(60)))
+    // Don't wake on our own voice (answers / live chat read aloud).
+    if !armed, SpeechOutput.shared.isBusy { return }
     let lower = text.lowercased()
     var after: String?
     for word in Self.wakeWords {

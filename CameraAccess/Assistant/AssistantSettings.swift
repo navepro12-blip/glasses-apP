@@ -145,6 +145,20 @@ final class AssistantSettings {
     get { HebrewVoice(rawValue: defaults.string(forKey: "hebrewVoice") ?? "") ?? .hila }
     set { defaults.set(newValue.rawValue, forKey: "hebrewVoice") }
   }
+  var tiktokUsername: String {
+    get { defaults.string(forKey: "tiktokUsername") ?? "" }
+    set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "@", with: ""), forKey: "tiktokUsername") }
+  }
+  /// Stream the glasses camera to OBS on the PC.
+  var obsEnabled: Bool {
+    get { defaults.bool(forKey: "obsEnabled") }
+    set { defaults.set(newValue, forKey: "obsEnabled") }
+  }
+  /// Send every recording to the PC media folder.
+  var autoUpload: Bool {
+    get { defaults.object(forKey: "autoUpload") as? Bool ?? true }
+    set { defaults.set(newValue, forKey: "autoUpload") }
+  }
   /// Always listen for "קלוד" (hands-free).
   var wakeWordEnabled: Bool {
     get { defaults.object(forKey: "wakeWordEnabled") as? Bool ?? false }

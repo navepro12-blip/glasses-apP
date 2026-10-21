@@ -27,6 +27,7 @@ jobs:
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION=1.0.${{ github.run_number }} CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             build > build.log 2>&1
           STATUS=$?
           tail -40 build.log
@@ -38,9 +39,9 @@ jobs:
         run: |
           APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
           mkdir -p Payload && cp -R "$APP" Payload/
-          zip -qry NaveGlasses.ipa Payload
-          ls -lh NaveGlasses.ipa
+          zip -qry NaveGlasses-1.0.${{ github.run_number }}.ipa Payload
+          ls -lh NaveGlasses-*.ipa
       - uses: actions/upload-artifact@v4
         with:
-          name: NaveGlasses-ipa-${{ matrix.os }}
-          path: NaveGlasses.ipa
+          name: NaveGlasses-v1.0.${{ github.run_number }}
+          path: NaveGlasses-*.ipa

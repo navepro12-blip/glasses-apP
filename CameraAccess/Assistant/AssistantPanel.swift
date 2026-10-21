@@ -8,6 +8,8 @@ import UIKit
 
 struct AssistantPanel: View {
   let frameProvider: @MainActor () -> UIImage?
+  let stillProvider: @MainActor () async -> UIImage?
+  @State private var chat = LiveChatReader.shared
   @State private var vm = AssistantViewModel()
   @State private var showSettings = false
 
@@ -35,7 +37,24 @@ struct AssistantPanel: View {
         .environment(\.layoutDirection, .rightToLeft)
       }
 
+      if chat.isOn || !chat.status.isEmpty {
+        Text([chat.status, chat.lastLine].filter { !$0.isEmpty }.joined(separator: " · "))
+          .font(.system(size: 12))
+          .foregroundStyle(.white.opacity(0.8))
+          .lineLimit(1)
+      }
+
       HStack(spacing: 14) {
+        Button {
+          if chat.isOn { chat.stop() } else { Task { await chat.start() } }
+        } label: {
+          Image(systemName: chat.isOn ? "bubble.left.and.text.bubble.right.fill" : "bubble.left.and.text.bubble.right")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(chat.isOn ? .red : .white)
+            .frame(width: 44, height: 44)
+            .background(.white.opacity(0.15), in: Circle())
+        }
+
         Button { showSettings = true } label: {
           Image(systemName: "slider.horizontal.3")
             .font(.system(size: 18, weight: .semibold))
@@ -66,6 +85,11 @@ struct AssistantPanel: View {
             .background(.white.opacity(0.15), in: Circle())
         }
       }
+      if vm.wakeEnabled, !vm.wakeStatus.isEmpty, vm.phase == .idle {
+        Text(vm.wakeStatus)
+          .font(.system(size: 11))
+          .foregroundStyle(.white.opacity(0.55))
+      }
       if vm.wakeActive, vm.phase == .idle {
         VStack(spacing: 2) {
           Text("👂 מקשיב… תגיד \"קלוד\" ואז את השאלה")
@@ -85,7 +109,7 @@ struct AssistantPanel: View {
           .foregroundStyle(.white.opacity(0.8))
       }
     }
-    .onAppear { vm.attach(frameProvider: frameProvider) }
+    .onAppear { vm.attach(frameProvider: frameProvider, stillProvider: stillProvider) }
     .sheet(isPresented: $showSettings, onDismiss: { vm.refreshKeyState() }) {
       AssistantSettingsView()
     }
@@ -138,6 +162,9 @@ struct AssistantSettingsView: View {
   @State private var useCamera = AssistantSettings.shared.useCamera
   @State private var testing = false
   @State private var wakeWord = AssistantSettings.shared.wakeWordEnabled
+  @State private var tiktokUser = AssistantSettings.shared.tiktokUsername
+  @State private var obs = AssistantSettings.shared.obsEnabled
+  @State private var autoUpload = AssistantSettings.shared.autoUpload
 
   var body: some View {
     NavigationStack {
@@ -154,7 +181,21 @@ struct AssistantSettingsView: View {
         } header: {
           Text("Claude")
         } footer: {
-          Text("המפתח נשמר רק בטלפון שלך (Keychain) ולא עולה ל-GitHub.")
+          Text("המפתח נשמר רק בטלפון שלך (Keychain) ולא עולה ל-GitHub. גרסה \(AppVersion.text)")
+        }
+
+        Section {
+          TextField("כתובת המחשב, למשל http://192.168.1.15:8790", text: $pcURL)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .keyboardType(.URL)
+          TextField("שם משתמש בטיקטוק (בלי @)", text: $tiktokUser)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+          Toggle("להעביר את המשקפיים כמצלמה ל-OBS", isOn: $obs)
+          Toggle("לשמור כל הקלטה במחשב", isOn: $autoUpload)
+        } header: {
+          Text("מחשב ולייב")
+        } footer: {
+          Text("ב-OBS: Browser Source עם הכתובת http://localhost:8790/cam. כפתור הבועות במסך הראשי מפעיל הקראת צ'אט.")
         }
 
         Section("שפת דיבור") {
@@ -170,9 +211,6 @@ struct AssistantSettingsView: View {
           }
           switch provider {
           case .pc:
-            TextField("כתובת מהחלון במחשב, למשל http://192.168.1.15:8790", text: $pcURL)
-              .textInputAutocapitalization(.never).autocorrectionDisabled()
-              .keyboardType(.URL)
             Picker("קול", selection: $pcVoice) {
               Text("נועה").tag("noa")
               Text("לילי").tag("lily")
@@ -249,5 +287,17 @@ struct AssistantSettingsView: View {
     s.geminiVoice = geminiVoice
     s.useCamera = useCamera
     s.wakeWordEnabled = wakeWord
+    s.tiktokUsername = tiktokUser
+    s.obsEnabled = obs
+    s.autoUpload = autoUpload
+  }
+}
+
+enum AppVersion {
+  static var text: String {
+    let info = Bundle.main.infoDictionary
+    let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let b = info?["CFBundleVersion"] as? String ?? "?"
+    return "\(v) (\(b))"
   }
 }

@@ -50,7 +50,7 @@ final class SpeechInput {
     request = req
 
     let input = engine.inputNode
-    let format = input.outputFormat(forBus: 0)
+    guard let format = await AudioRoute.validInputFormat(input) else { throw InputError.unavailable }
     Self.installTap(on: input, format: format, request: req)
     engine.prepare()
     try engine.start()

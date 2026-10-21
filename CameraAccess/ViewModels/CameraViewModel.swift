@@ -172,6 +172,32 @@ final class CameraViewModel {
   @ObservationIgnored private let sessionTokenBag = ListenerTokenBag()
   @ObservationIgnored private let streamTokenBag = ListenerTokenBag()
 
+  @ObservationIgnored private var aiPhotoContinuation: CheckedContinuation<UIImage?, Never>?
+
+  /// Full-resolution still for Claude ("look closer"), without opening the
+  /// share sheet. Returns nil if not streaming or it times out.
+  func captureStillForAI() async -> UIImage? {
+    guard isStreaming, !isCapturingPhoto, aiPhotoContinuation == nil else { return currentVideoFrame }
+    isCapturingPhoto = true
+    let started = camera?.stream.capturePhoto(format: .jpeg) ?? false
+    guard started else {
+      isCapturingPhoto = false
+      return currentVideoFrame
+    }
+    let timeout = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .seconds(6))
+      guard let self, let c = self.aiPhotoContinuation else { return }
+      self.aiPhotoContinuation = nil
+      self.isCapturingPhoto = false
+      c.resume(returning: self.currentVideoFrame)
+    }
+    let image = await withCheckedContinuation { (c: CheckedContinuation<UIImage?, Never>) in
+      aiPhotoContinuation = c
+    }
+    timeout.cancel()
+    return image
+  }
+
   @ObservationIgnored private let photoCaptureFailureMessage =
     "Couldn't capture photo. There may not be enough storage, or another capture is in progress. Try again in a few moments."
   @ObservationIgnored private let backgroundStopErrorSuppressionTimeout: Duration
@@ -369,12 +395,35 @@ final class CameraViewModel {
     switch await videoRecorder.stopRecording() {
     case .completed(let url):
       activePreview = .video(url)
+      uploadRecordingIfEnabled(url)
     case .noRecording:
       // Reached only after the intent guard + start wait, so while streaming this
       // means the recording never started (e.g. the writer failed to start).
       showError("Couldn't start recording. Try again.")
     case .failed:
       showError("Recording couldn't be saved. Try again.")
+    }
+  }
+
+  /// Copies the clip (the preview deletes the original on dismiss) and sends
+  /// it to the PC media folder in the background.
+  private func uploadRecordingIfEnabled(_ url: URL) {
+    guard AssistantSettings.shared.autoUpload, PCBridge.baseURL != nil else { return }
+    let stamp = Int(Date().timeIntervalSince1970)
+    let copy = FileManager.default.temporaryDirectory.appendingPathComponent("glasses_\(stamp).mp4")
+    do {
+      try FileManager.default.copyItem(at: url, to: copy)
+    } catch {
+      return
+    }
+    Task {
+      do {
+        try await PCBridge.upload(fileAt: copy)
+        SpeechOutput.shared.enqueue("הסרטון נשמר במחשב")
+      } catch {
+        SpeechOutput.shared.enqueue("לא הצלחתי לשמור את הסרטון במחשב")
+      }
+      try? FileManager.default.removeItem(at: copy)
     }
   }
 
@@ -509,6 +558,7 @@ final class CameraViewModel {
           let image = previewImage
         {
           self.currentVideoFrame = image
+          ObsStreamer.shared.offer(image)
           if !self.hasReceivedFirstFrame {
             self.hasReceivedFirstFrame = true
           }
@@ -576,6 +626,11 @@ final class CameraViewModel {
 
   private func handlePhotoData(_ data: PhotoData) {
     isCapturingPhoto = false
+    if let c = aiPhotoContinuation {
+      aiPhotoContinuation = nil
+      c.resume(returning: UIImage(data: data.data))
+      return
+    }
     if let image = UIImage(data: data.data) {
       activePreview = .photo(image)
     }
