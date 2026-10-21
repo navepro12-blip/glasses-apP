@@ -4,8 +4,22 @@ Nave Glasses — free local Hebrew voice server (BlueTTS, MIT, runs on this PC).
 The phone app POSTs text to /tts and gets back a WAV. Runs on the home Wi-Fi
 (or over Tailscale from anywhere). Start it with start.bat.
 """
+import builtins
 import io
 import os
+
+# Windows with a Hebrew locale opens text files as cp1255 by default, which
+# breaks loading the model's JSON files. Force UTF-8 for text-mode opens.
+_builtin_open = builtins.open
+
+
+def _utf8_open(file, mode="r", buffering=-1, encoding=None, *args, **kwargs):
+    if "b" not in mode and encoding is None:
+        encoding = "utf-8"
+    return _builtin_open(file, mode, buffering, encoding, *args, **kwargs)
+
+
+builtins.open = _utf8_open
 import re
 import socket
 import threading
