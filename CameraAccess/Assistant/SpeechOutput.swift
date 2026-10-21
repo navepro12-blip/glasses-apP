@@ -31,7 +31,12 @@ final class SpeechOutput: NSObject {
     let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !clean.isEmpty else { return }
     queue.append(clean)
-    if !isSpeaking { Task { await drain() } }
+    // Flip the flag synchronously: two enqueues in the same tick must not
+    // start two drain loops (they would fight over the single continuation).
+    if !isSpeaking {
+      isSpeaking = true
+      Task { await drain() }
+    }
   }
 
   func stopAll() {
@@ -44,6 +49,14 @@ final class SpeechOutput: NSObject {
   var queuedCount: Int { queue.count }
   var isBusy: Bool { isSpeaking || !queue.isEmpty }
 
+  /// Waits until everything queued has been spoken (bounded).
+  func waitUntilIdle(maxSeconds: Double = 60) async {
+    let deadline = Date().addingTimeInterval(maxSeconds)
+    while isBusy, Date() < deadline {
+      try? await Task.sleep(for: .milliseconds(150))
+    }
+  }
+
   private func drain() async {
     isSpeaking = true
     AudioRoute.activateForPlayback()
@@ -52,6 +65,22 @@ final class SpeechOutput: NSObject {
       await speakOne(text)
     }
     isSpeaking = false
+  }
+
+  /// Awaits `finish`, but never forever: a player/synth that fails to call
+  /// back would otherwise hang the queue (and everything that checks isBusy).
+  private func awaitFinish(timeoutSeconds: Double, start: () -> Void) async {
+    // Never leave an earlier continuation dangling.
+    resume()
+    let timeout = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .seconds(timeoutSeconds))
+      self?.resume()
+    }
+    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+      finish = c
+      start()
+    }
+    timeout.cancel()
   }
 
   private func speakOne(_ text: String) async {
@@ -86,8 +115,8 @@ final class SpeechOutput: NSObject {
     guard let p = try? AVAudioPlayer(data: data) else { return }
     player = p
     p.delegate = self
-    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-      finish = c
+    let seconds = max(5, p.duration + 4)
+    await awaitFinish(timeoutSeconds: seconds) {
       if !p.play() { resume() }
     }
     player = nil
@@ -98,8 +127,8 @@ final class SpeechOutput: NSObject {
     let lang = TextLanguage.isHebrew(text) ? "he-IL" : "en-US"
     utterance.voice = Self.bestVoice(for: lang)
     utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.05
-    await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-      finish = c
+    let seconds = max(6, Double(text.count) * 0.12 + 3)
+    await awaitFinish(timeoutSeconds: seconds) {
       synth.speak(utterance)
     }
   }
@@ -308,6 +337,15 @@ enum AudioRoute {
     return nil
   }
 
+  /// True while the wake-word listener owns the mic. The recorder checks this
+  /// before deactivating the shared session when a recording stops.
+  nonisolated(unsafe) private static var _assistantListening = false
+  private static let flagLock = NSLock()
+  static var assistantListening: Bool {
+    get { flagLock.lock(); defer { flagLock.unlock() }; return _assistantListening }
+    set { flagLock.lock(); _assistantListening = newValue; flagLock.unlock() }
+  }
+
   static func activateForPlayback() {
     configure()
   }
@@ -316,12 +354,16 @@ enum AudioRoute {
     configure()
   }
 
+  private static let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
+
+  /// Sets the category only when it actually differs — every setCategory call
+  /// restarts running audio engines, which cost us the listener each time.
   private static func configure() {
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(
-        .playAndRecord, mode: .default,
-        options: [.allowBluetooth, .allowBluetoothA2DP, .duckOthers])
+      if session.category != .playAndRecord || session.mode != .default || session.categoryOptions != options {
+        try session.setCategory(.playAndRecord, mode: .default, options: options)
+      }
       try session.setActive(true)
     } catch {
       NSLog("[NaveGlasses] audio session error: \(error)")

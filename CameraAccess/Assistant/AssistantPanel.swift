@@ -10,7 +10,7 @@ struct AssistantPanel: View {
   let frameProvider: @MainActor () -> UIImage?
   let stillProvider: @MainActor () async -> UIImage?
   @State private var chat = LiveChatReader.shared
-  @State private var vm = AssistantViewModel()
+  @State private var vm = AssistantViewModel.shared
   @State private var showSettings = false
 
   var body: some View {
@@ -85,10 +85,11 @@ struct AssistantPanel: View {
             .background(.white.opacity(0.15), in: Circle())
         }
       }
-      if vm.wakeEnabled, !vm.wakeStatus.isEmpty, vm.phase == .idle {
+      if vm.wakeEnabled, !vm.wakeStatus.isEmpty {
         Text(vm.wakeStatus)
           .font(.system(size: 11))
           .foregroundStyle(.white.opacity(0.55))
+          .lineLimit(1)
       }
       if vm.wakeActive, vm.phase == .idle {
         VStack(spacing: 2) {
@@ -102,6 +103,12 @@ struct AssistantPanel: View {
               .lineLimit(1)
           }
         }
+        .environment(\.layoutDirection, .rightToLeft)
+      }
+      if vm.followUpOpen, vm.phase == .listening {
+        Text("💬 אפשר להמשיך לדבר בלי \"קלוד\"")
+          .font(.system(size: 13))
+          .foregroundStyle(.white.opacity(0.85))
       }
       if !vm.hasKey {
         Text("הוסף מפתח Anthropic בהגדרות כדי להפעיל את Claude")
@@ -165,6 +172,8 @@ struct AssistantSettingsView: View {
   @State private var tiktokUser = AssistantSettings.shared.tiktokUsername
   @State private var obs = AssistantSettings.shared.obsEnabled
   @State private var autoUpload = AssistantSettings.shared.autoUpload
+  @State private var followUp = AssistantSettings.shared.followUpEnabled
+  @State private var location = AssistantSettings.shared.locationEnabled
 
   var body: some View {
     NavigationStack {
@@ -178,6 +187,8 @@ struct AssistantSettingsView: View {
           }
           Toggle("לשלוח את מה שהמשקפיים רואים", isOn: $useCamera)
           Toggle("האזנה רציפה למילה \"קלוד\" (בלי ללחוץ)", isOn: $wakeWord)
+          Toggle("חלון המשך אחרי תשובה (בלי לומר \"קלוד\" שוב)", isOn: $followUp)
+          Toggle("לשתף מיקום עם Claude (מזג אוויר, חניה, מה קרוב)", isOn: $location)
         } header: {
           Text("Claude")
         } footer: {
@@ -259,6 +270,8 @@ struct AssistantSettingsView: View {
       }
       .environment(\.layoutDirection, .rightToLeft)
       .navigationTitle("הגדרות Claude")
+      // Swipe-down dismiss must not lose the changes either.
+      .onDisappear { save() }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) {
           Button("שמור") {
@@ -290,6 +303,8 @@ struct AssistantSettingsView: View {
     s.tiktokUsername = tiktokUser
     s.obsEnabled = obs
     s.autoUpload = autoUpload
+    s.followUpEnabled = followUp
+    s.locationEnabled = location
   }
 }
 

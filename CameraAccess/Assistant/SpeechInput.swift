@@ -3,6 +3,10 @@
 // Push-to-talk speech recognition (Apple Speech, Hebrew or English) from the
 // current input route — the glasses mic when they're connected over Bluetooth.
 //
+// A fresh AVAudioEngine is built for every start(): reusing one across
+// Bluetooth route changes leaves it with a stale format and installTap/start
+// then raise a fatal Objective-C exception.
+//
 
 @preconcurrency import AVFoundation
 import Foundation
@@ -20,10 +24,14 @@ final class SpeechInput {
     }
   }
 
-  private let engine = AVAudioEngine()
+  private var engine: AVAudioEngine?
   private var request: SFSpeechAudioBufferRecognitionRequest?
   private var task: SFSpeechRecognitionTask?
+  private var generation = 0
   private(set) var transcript: String = ""
+  /// Set whenever the transcript changes (used by the follow-up window).
+  private(set) var lastChange = Date.distantPast
+  private(set) var isListening = false
   var onPartial: (@MainActor (String) -> Void)?
 
   nonisolated static func requestAuthorization() async -> Bool {
@@ -35,30 +43,50 @@ final class SpeechInput {
   }
 
   func start(language: ListenLanguage) async throws {
+    // Any earlier session is torn down first; a generation stamp makes sure an
+    // overlapping start (e.g. two quick taps) can't install two taps.
+    stopEngine()
+    generation += 1
+    let gen = generation
     guard await Self.requestAuthorization() else { throw InputError.notAuthorized }
+    guard gen == generation else { return }
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language.rawValue)),
       recognizer.isAvailable
     else { throw InputError.unavailable }
 
-    stopEngine()
     transcript = ""
+    lastChange = Date()
     AudioRoute.activateForListening()
+
+    let newEngine = AVAudioEngine()
+    let input = newEngine.inputNode
+    guard let format = await AudioRoute.validInputFormat(input) else { throw InputError.unavailable }
+    guard gen == generation else { return }
+    stopEngine()
 
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
-    if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = false }
+    req.requiresOnDeviceRecognition = false
+    req.taskHint = .dictation
     request = req
-
-    let input = engine.inputNode
-    guard let format = await AudioRoute.validInputFormat(input) else { throw InputError.unavailable }
+    engine = newEngine
     Self.installTap(on: input, format: format, request: req)
-    engine.prepare()
-    try engine.start()
+    newEngine.prepare()
+    do {
+      try newEngine.start()
+    } catch {
+      stopEngine()
+      throw error
+    }
+    isListening = true
 
     task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, isFinal in
       Task { @MainActor in
-        guard let self else { return }
-        self.transcript = text
+        guard let self, self.generation == gen else { return }
+        if self.transcript != text {
+          self.transcript = text
+          self.lastChange = Date()
+        }
         self.onPartial?(text)
         _ = isFinal
       }
@@ -68,25 +96,38 @@ final class SpeechInput {
   /// Stops listening and returns the final transcript (waits briefly for the
   /// recognizer to settle after the audio ends).
   func finish() async -> String {
+    guard isListening else { return transcript.trimmingCharacters(in: .whitespacesAndNewlines) }
+    isListening = false
     request?.endAudio()
-    engine.stop()
-    engine.inputNode.removeTap(onBus: 0)
+    if let engine {
+      engine.inputNode.removeTap(onBus: 0)
+      if engine.isRunning { engine.stop() }
+    }
+    engine = nil
+    let gen = generation
     try? await Task.sleep(for: .milliseconds(700))
-    task?.finish()
-    task = nil
-    request = nil
+    if gen == generation {
+      task?.finish()
+      task = nil
+      request = nil
+    }
     return transcript.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
   func cancel() {
+    generation += 1
     task?.cancel()
     task = nil
     stopEngine()
   }
 
   private func stopEngine() {
-    if engine.isRunning { engine.stop() }
-    engine.inputNode.removeTap(onBus: 0)
+    isListening = false
+    if let engine {
+      engine.inputNode.removeTap(onBus: 0)
+      if engine.isRunning { engine.stop() }
+    }
+    engine = nil
     request?.endAudio()
     request = nil
   }
@@ -97,6 +138,7 @@ final class SpeechInput {
     on node: AVAudioInputNode, format: AVAudioFormat, request: SFSpeechAudioBufferRecognitionRequest
   ) {
     nonisolated(unsafe) let req = request
+    node.removeTap(onBus: 0)
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
       req.append(buffer)
     }

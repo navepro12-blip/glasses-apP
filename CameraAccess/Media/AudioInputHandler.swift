@@ -115,11 +115,16 @@ final class AudioInputHandler: Sendable {
     engine.inputNode.removeTap(onBus: 0)
     // Terminal stop: deactivate the shared session we claimed in configureBluetooth()
     // so other apps' audio can resume (.notifyOthersOnDeactivation prompts them).
-    do {
-      try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    } catch {
-      Self.logger.error("Failed to deactivate audio session: \(error.localizedDescription)")
+    // Not while the Claude wake-word listener owns the mic — deactivating would
+    // silently kill its engine. Either way, tell the assistant so it re-arms.
+    if !AudioRoute.assistantListening {
+      do {
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      } catch {
+        Self.logger.error("Failed to deactivate audio session: \(error.localizedDescription)")
+      }
     }
+    NotificationCenter.default.post(name: .glassesAudioSessionReleased, object: nil)
   }
 
   // MARK: - Notification Setup

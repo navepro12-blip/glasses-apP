@@ -161,8 +161,18 @@ final class AssistantSettings {
   }
   /// Always listen for "קלוד" (hands-free).
   var wakeWordEnabled: Bool {
-    get { defaults.object(forKey: "wakeWordEnabled") as? Bool ?? false }
+    get { defaults.object(forKey: "wakeWordEnabled") as? Bool ?? true }
     set { defaults.set(newValue, forKey: "wakeWordEnabled") }
+  }
+  /// After an answer, keep listening a few seconds for a follow-up (no wake word needed).
+  var followUpEnabled: Bool {
+    get { defaults.object(forKey: "followUpEnabled") as? Bool ?? true }
+    set { defaults.set(newValue, forKey: "followUpEnabled") }
+  }
+  /// Share a coarse location with Claude (weather, nearby, where I parked).
+  var locationEnabled: Bool {
+    get { defaults.object(forKey: "locationEnabled") as? Bool ?? true }
+    set { defaults.set(newValue, forKey: "locationEnabled") }
   }
   /// Send the current glasses frame with each question.
   var useCamera: Bool {

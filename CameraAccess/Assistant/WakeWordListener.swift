@@ -5,6 +5,16 @@
 // question: "קלוד, מה האבן הזאת?". Saying only the wake word opens a short
 // window for the question.
 //
+// Robustness notes (these were the crash sources):
+// - A fresh AVAudioEngine is created for every listening attempt. Reusing one
+//   engine across Bluetooth route changes (A2DP ↔ HFP, glasses on/off) leaves
+//   it with a stale hardware format, and installTap/start then raise an
+//   Objective-C exception that kills the app.
+// - The tap is always removed before a new one is installed (installing twice
+//   on the same bus is also a fatal exception).
+// - Every restart path goes through one serialised `beginRecognition()` with a
+//   generation counter, so late callbacks from an old task are ignored.
+//
 
 @preconcurrency import AVFoundation
 import AudioToolbox
@@ -13,8 +23,6 @@ import Foundation
 
 @MainActor
 final class WakeWordListener {
-  static let wakeWords = ["היי קלוד", "הי קלוד", "קלוד", "קלאוד", "קלוט", "hey claude", "claude", "cloud", "clod"]
-
   /// A full command was heard ("קלוד <question>").
   var onCommand: (@MainActor (String) -> Void)?
   /// Only the wake word was heard; the caller should listen for the question.
@@ -25,14 +33,13 @@ final class WakeWordListener {
   var onRaw: (@MainActor (String) -> Void)?
   /// Fired once when the wake word is first detected.
   var onWake: (@MainActor () -> Void)?
-
-  private(set) var isRunning = false
   /// Human-readable state for the on-screen diagnostics line.
   var onStatus: (@MainActor (String) -> Void)?
+
+  private(set) var isRunning = false
   private var observers: [NSObjectProtocol] = []
-  private var lastBegin = Date.distantPast
   private var language: ListenLanguage = .hebrew
-  private let engine = AVAudioEngine()
+  private var engine: AVAudioEngine?
   private var request: SFSpeechAudioBufferRecognitionRequest?
   private var task: SFSpeechRecognitionTask?
   private var generation = 0
@@ -40,48 +47,86 @@ final class WakeWordListener {
   private var command = ""
   private var silenceTask: Task<Void, Never>?
   private var recycleTask: Task<Void, Never>?
+  private var restartTask: Task<Void, Never>?
+  private var consecutiveFailures = 0
 
   func start(language: ListenLanguage) async throws {
     guard !isRunning else { return }
-    guard await SpeechInput.requestAuthorization() else { throw SpeechInput.InputError.notAuthorized }
-    self.language = language
+    // Mark running *before* the permission await so a stop() that arrives in
+    // the meantime is honoured (otherwise two listeners end up on the mic).
     isRunning = true
-    observeAudioChanges()
-    try beginRecognition()
-  }
-
-  /// Starting the glasses stream / Bluetooth route changes stop AVAudioEngine
-  /// silently — restart listening whenever that happens.
-  private func observeAudioChanges() {
-    guard observers.isEmpty else { return }
-    let nc = NotificationCenter.default
-    let restart: @Sendable (Notification) -> Void = { [weak self] note in
-      let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap {
-        AVAudioSession.RouteChangeReason(rawValue: $0)
-      }
-      if reason == .categoryChange || reason == .override { return }
-      Task { @MainActor in
-        guard let self, self.isRunning, !self.armed,
-          Date().timeIntervalSince(self.lastBegin) > 2
-        else { return }
-        try? await Task.sleep(for: .milliseconds(600))
-        self.onStatus?("מתחבר מחדש למיקרופון…")
-        try? self.beginRecognition()
-      }
+    self.language = language
+    let ok = await SpeechInput.requestAuthorization()
+    guard isRunning else { return }
+    guard ok else {
+      isRunning = false
+      throw SpeechInput.InputError.notAuthorized
     }
-    observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil, using: restart))
-    observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil, using: restart))
+    AudioRoute.assistantListening = true
+    observeAudioChanges()
+    consecutiveFailures = 0
+    try beginRecognition()
   }
 
   func stop() {
     isRunning = false
+    AudioRoute.assistantListening = false
     observers.forEach { NotificationCenter.default.removeObserver($0) }
     observers.removeAll()
     silenceTask?.cancel()
     recycleTask?.cancel()
+    restartTask?.cancel()
+    silenceTask = nil
+    recycleTask = nil
+    restartTask = nil
     tearDown()
   }
+
+  // MARK: - Audio route / engine changes
+
+  /// Starting the glasses stream, Bluetooth route changes and the end of a
+  /// recording all stop AVAudioEngine silently — restart listening then.
+  private func observeAudioChanges() {
+    guard observers.isEmpty else { return }
+    let nc = NotificationCenter.default
+    let restart: @Sendable (Notification) -> Void = { [weak self] _ in
+      Task { @MainActor in self?.scheduleRestart(after: .milliseconds(700), reason: "מתחבר מחדש למיקרופון…") }
+    }
+    // object: nil — the engine instance changes on every restart.
+    observers.append(nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil, using: restart))
+    observers.append(nc.addObserver(forName: .glassesAudioSessionReleased, object: nil, queue: nil, using: restart))
+  }
+
+  /// Coalesces restart requests: many notifications arrive in a burst when
+  /// Bluetooth switches profiles, and only the last one matters.
+  private func scheduleRestart(after delay: Duration, reason: String?) {
+    guard isRunning, !armed else { return }
+    restartTask?.cancel()
+    restartTask = Task { [weak self] in
+      try? await Task.sleep(for: delay)
+      guard let self, !Task.isCancelled, self.isRunning, !self.armed else { return }
+      if let reason { self.onStatus?(reason) }
+      self.beginRecognitionSafely()
+    }
+  }
+
+  private func beginRecognitionSafely() {
+    do {
+      try beginRecognition()
+      consecutiveFailures = 0
+    } catch {
+      consecutiveFailures += 1
+      onStatus?("המיקרופון לא זמין (\(error.localizedDescription)) — מנסה שוב")
+      // Back off so a dead route doesn't turn into a tight restart loop.
+      let seconds = min(10, 1 << min(consecutiveFailures, 3))
+      scheduleRestart(after: .seconds(seconds), reason: nil)
+    }
+  }
+
+  // MARK: - Recognition
 
   private func beginRecognition() throws {
     tearDown()
@@ -90,7 +135,6 @@ final class WakeWordListener {
       recognizer.isAvailable
     else { throw SpeechInput.InputError.unavailable }
 
-    lastBegin = Date()
     armed = false
     command = ""
     generation += 1
@@ -100,38 +144,40 @@ final class WakeWordListener {
     let req = SFSpeechAudioBufferRecognitionRequest()
     req.shouldReportPartialResults = true
     req.requiresOnDeviceRecognition = false
+    req.taskHint = .dictation
+    req.contextualStrings = WakeWord.contextualStrings
     request = req
 
-    let input = engine.inputNode
+    let newEngine = AVAudioEngine()
+    let input = newEngine.inputNode
     let format = input.outputFormat(forBus: 0)
     // While Bluetooth is switching the mic reports 0 Hz — installing a tap
     // then crashes the app. Retry shortly instead.
     guard format.sampleRate > 0, format.channelCount > 0 else {
       request = nil
       onStatus?("ממתין למיקרופון…")
-      Task { [weak self] in
-        try? await Task.sleep(for: .milliseconds(800))
-        guard let self, self.isRunning else { return }
-        try? self.beginRecognition()
-      }
+      scheduleRestart(after: .milliseconds(900), reason: nil)
       return
     }
+    engine = newEngine
     Self.installTap(on: input, format: format, request: req)
-    engine.prepare()
+    newEngine.prepare()
     do {
-      try engine.start()
+      try newEngine.start()
     } catch {
-      onStatus?("שגיאת מיקרופון: \(error.localizedDescription)")
+      newEngine.inputNode.removeTap(onBus: 0)
+      engine = nil
+      request = nil
       throw error
     }
     let route = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? "?"
-    onStatus?("מקשיב דרך: \(route)")
+    onStatus?("👂 מקשיב דרך: \(route)")
 
     task = Self.makeTask(recognizer: recognizer, request: req) { [weak self] text, ended in
       Task { @MainActor in
-        guard let self, self.generation == gen else { return }
+        guard let self, self.generation == gen, self.isRunning else { return }
         if !text.isEmpty { self.handle(text) }
-        if ended { self.restartSoon() }
+        if ended { self.scheduleRestart(after: .milliseconds(250), reason: nil) }
       }
     }
 
@@ -139,9 +185,9 @@ final class WakeWordListener {
     // while idle so listening never silently stops.
     recycleTask?.cancel()
     recycleTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(50))
+      try? await Task.sleep(for: .seconds(45))
       guard let self, !Task.isCancelled, self.isRunning, !self.armed, self.generation == gen else { return }
-      try? self.beginRecognition()
+      self.beginRecognitionSafely()
     }
   }
 
@@ -149,55 +195,44 @@ final class WakeWordListener {
     onRaw?(String(text.suffix(60)))
     // Don't wake on our own voice (answers / live chat read aloud).
     if !armed, SpeechOutput.shared.isBusy { return }
-    let lower = text.lowercased()
-    var after: String?
-    for word in Self.wakeWords {
-      if let r = lower.range(of: word, options: .backwards) {
-        let tail = String(lower[r.upperBound...])
-        if after == nil || tail.count < after!.count { after = tail }
-      }
-    }
-    guard let tail = after else { return }
+    guard let tail = WakeWord.commandAfterWakeWord(in: text) else { return }
     if !armed { onWake?() }
     armed = true
-    command = tail.trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?:–-").union(.whitespacesAndNewlines))
+    command = tail
     onPartial?(command)
 
-    // Finish when the speaker pauses: 1.3 s after the last change with a
-    // question, or 4 s if only the wake word was said.
+    // Finish when the speaker pauses: 1.4 s after the last change with a
+    // question, or 3 s if only the wake word was said.
     silenceTask?.cancel()
-    let wait: Duration = command.isEmpty ? .seconds(4) : .milliseconds(1300)
+    let wait: Duration = command.isEmpty ? .seconds(3) : .milliseconds(1400)
     silenceTask = Task { [weak self] in
       try? await Task.sleep(for: wait)
-      guard let self, !Task.isCancelled, self.isRunning else { return }
+      guard let self, !Task.isCancelled, self.isRunning, self.armed else { return }
       let heard = self.command
       self.stop()
       if heard.isEmpty { self.onWakeOnly?() } else { self.onCommand?(heard) }
     }
   }
 
-  private func restartSoon() {
-    guard isRunning, !armed else { return }
-    Task { [weak self] in
-      try? await Task.sleep(for: .milliseconds(300))
-      guard let self, self.isRunning else { return }
-      try? self.beginRecognition()
-    }
-  }
-
   private func tearDown() {
     task?.cancel()
     task = nil
-    if engine.isRunning { engine.stop() }
-    engine.inputNode.removeTap(onBus: 0)
     request?.endAudio()
     request = nil
+    if let engine {
+      engine.inputNode.removeTap(onBus: 0)
+      if engine.isRunning { engine.stop() }
+    }
+    engine = nil
   }
 
+  // Built outside the main actor: the tap and result blocks run on audio /
+  // speech threads, and Swift 6 would otherwise trap on the isolation check.
   nonisolated private static func installTap(
     on node: AVAudioInputNode, format: AVAudioFormat, request: SFSpeechAudioBufferRecognitionRequest
   ) {
     nonisolated(unsafe) let req = request
+    node.removeTap(onBus: 0)
     node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
       req.append(buffer)
     }
@@ -217,17 +252,71 @@ final class WakeWordListener {
   }
 }
 
+/// Matching the wake word the way Apple's Hebrew recogniser actually spells it.
+enum WakeWord {
+  static let contextualStrings = ["קלוד", "היי קלוד", "הי קלוד", "Claude", "hey Claude"]
+
+  /// Exact spellings (normalised: lowercase, no geresh/quotes/nikud).
+  static let exact: Set<String> = [
+    "קלוד", "קלאוד", "קלוט", "קלאד", "קלודה", "קלודי", "כלוד", "קלווד", "גלוד", "קלאודי",
+    "claude", "cloud", "clod", "claud", "klod", "klaud", "clawed", "clode", "cloude", "glaud",
+  ]
+
+  /// Does one spoken token sound like the name? ("היי"/"hey" before it is simply skipped.)
+  static func isWakeToken(_ raw: String) -> Bool {
+    let t = normalize(raw)
+    guard !t.isEmpty else { return false }
+    if exact.contains(t) { return true }
+    // Hebrew: ק/כ/ג + ל + 0–2 vowels (א/ו) + ד/ט [+ optional ה/י]
+    if t.range(of: "^[קכג]ל[או]{0,2}[דט][הי]?$", options: .regularExpression) != nil { return true }
+    // Latin: (c|k|g)l + vowel cluster + d(e)
+    if t.range(of: "^[ckg]l(a|o|au|ou|aw|oa)+(d|de|t)$", options: .regularExpression) != nil { return true }
+    return false
+  }
+
+  /// Returns the text after the (last) wake word, or nil if it wasn't said.
+  /// The command is trimmed of punctuation; an empty string means "name only".
+  static func commandAfterWakeWord(in text: String) -> String? {
+    let tokens = text.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "." || $0 == "!" || $0 == "?" })
+      .map(String.init)
+    guard let idx = tokens.lastIndex(where: isWakeToken) else { return nil }
+    let tail = tokens[(idx + 1)...].joined(separator: " ")
+    return tail.trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?:–-;").union(.whitespacesAndNewlines))
+  }
+
+  static func normalize(_ s: String) -> String {
+    var out = ""
+    for scalar in s.lowercased().unicodeScalars {
+      let v = scalar.value
+      // Hebrew points (nikud) and cantillation
+      if (0x0591...0x05C7).contains(v) { continue }
+      // geresh / gershayim / quotes / apostrophes
+      if v == 0x05F3 || v == 0x05F4 || v == 0x27 || v == 0x22 || v == 0x2019 || v == 0x2018 { continue }
+      out.unicodeScalars.append(scalar)
+    }
+    // final-letter forms → regular, so "קלוד" and a trailing-ד variant compare equal
+    return out.replacingOccurrences(of: "ך", with: "כ")
+  }
+}
+
 extension Notification.Name {
   /// Posted when the wearer taps the glasses touchpad (the SDK pauses the stream).
   static let glassesTapPause = Notification.Name("NaveGlasses.tapPause")
   /// Posted when a second tap resumes the stream.
   static let glassesTapResume = Notification.Name("NaveGlasses.tapResume")
+  /// Posted when the recorder deactivated the shared audio session (recording stopped).
+  static let glassesAudioSessionReleased = Notification.Name("NaveGlasses.audioSessionReleased")
 }
-
 
 /// Short "I heard you" sound when the wake word is caught.
 enum Chime {
   static func play() {
     AudioServicesPlaySystemSound(1113)
+  }
+  static func playDone() {
+    AudioServicesPlaySystemSound(1114)
+  }
+  static func playTimer() {
+    AudioServicesPlaySystemSound(1005)
   }
 }

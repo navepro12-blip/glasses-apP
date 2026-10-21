@@ -173,23 +173,31 @@ final class CameraViewModel {
   @ObservationIgnored private let streamTokenBag = ListenerTokenBag()
 
   @ObservationIgnored private var aiPhotoContinuation: CheckedContinuation<UIImage?, Never>?
+  /// True from a Claude photo request until its photo arrives (even after the
+  /// request timed out), so the late photo never opens the share sheet.
+  @ObservationIgnored private var aiPhotoPending = false
 
   /// Full-resolution still for Claude ("look closer"), without opening the
   /// share sheet. Returns nil if not streaming or it times out.
   func captureStillForAI() async -> UIImage? {
     guard isStreaming, !isCapturingPhoto, aiPhotoContinuation == nil else { return currentVideoFrame }
     isCapturingPhoto = true
+    aiPhotoPending = true
     let started = camera?.stream.capturePhoto(format: .jpeg) ?? false
     guard started else {
       isCapturingPhoto = false
+      aiPhotoPending = false
       return currentVideoFrame
     }
+    let fallback = currentVideoFrame
     let timeout = Task { @MainActor [weak self] in
       try? await Task.sleep(for: .seconds(6))
       guard let self, let c = self.aiPhotoContinuation else { return }
+      // Keep aiPhotoPending set: a photo that arrives late is swallowed in
+      // handlePhotoData instead of opening the share sheet.
       self.aiPhotoContinuation = nil
       self.isCapturingPhoto = false
-      c.resume(returning: self.currentVideoFrame)
+      c.resume(returning: fallback)
     }
     let image = await withCheckedContinuation { (c: CheckedContinuation<UIImage?, Never>) in
       aiPhotoContinuation = c
@@ -351,6 +359,8 @@ final class CameraViewModel {
       return
     }
     isCapturingPhoto = true
+    // The user wants to see this one even if a Claude photo never showed up.
+    aiPhotoPending = false
     let success = camera?.stream.capturePhoto(format: .jpeg) ?? false
     if !success {
       isCapturingPhoto = false
@@ -626,9 +636,12 @@ final class CameraViewModel {
 
   private func handlePhotoData(_ data: PhotoData) {
     isCapturingPhoto = false
-    if let c = aiPhotoContinuation {
-      aiPhotoContinuation = nil
-      c.resume(returning: UIImage(data: data.data))
+    if aiPhotoPending {
+      aiPhotoPending = false
+      if let c = aiPhotoContinuation {
+        aiPhotoContinuation = nil
+        c.resume(returning: UIImage(data: data.data))
+      }
       return
     }
     if let image = UIImage(data: data.data) {

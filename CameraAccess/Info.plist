@@ -88,6 +88,17 @@
 	<string>So you can talk to Claude through your glasses.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>So Claude can find the person you ask to call.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>waze</string>
+		<string>whatsapp</string>
+	</array>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>So Claude can add and read your reminders when you ask through the glasses.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>So Claude can tell you what is on your calendar and add events you ask for.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>So Claude knows where you are for weather, nearby places and remembering where you parked.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs microphone access to record sound from your glasses' microphone alongside video.</string>
 	<key>UIApplicationSceneManifest</key>

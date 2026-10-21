@@ -82,9 +82,100 @@ final class ToolBox {
         ? "Live chat reading started for @\(AssistantSettings.shared.tiktokUsername)."
         : "Couldn't start: \(LiveChatReader.shared.status)"
 
+    // MARK: Daily life
+
+    case "add_reminder":
+      let title = input["title"] as? String ?? ""
+      guard !title.isEmpty else { return "A title is required." }
+      return await CalendarAgent.shared.addReminder(
+        title: title, dueAt: input["due_at"] as? String, inMinutes: Self.int(input["in_minutes"]),
+        notes: input["notes"] as? String)
+
+    case "list_reminders":
+      return await CalendarAgent.shared.openReminders()
+
+    case "get_agenda":
+      return await CalendarAgent.shared.agenda(dayOffset: Self.int(input["day_offset"]) ?? 0)
+
+    case "add_event":
+      let title = input["title"] as? String ?? ""
+      let start = input["start_at"] as? String ?? ""
+      guard !title.isEmpty, !start.isEmpty else { return "title and start_at are required." }
+      return await CalendarAgent.shared.addEvent(
+        title: title, startAt: start, minutes: Self.int(input["minutes"]) ?? 60, location: input["location"] as? String)
+
+    case "set_timer":
+      let seconds = Self.int(input["seconds"]) ?? 0
+      return await TimerAgent.shared.set(seconds: seconds, label: input["label"] as? String ?? "")
+
+    case "timers":
+      if (input["action"] as? String) == "cancel" { return TimerAgent.shared.cancelAll() }
+      return TimerAgent.shared.status()
+
+    case "remember_this":
+      let text = input["text"] as? String ?? ""
+      guard !text.isEmpty else { return "Say what to remember." }
+      let withPhoto = (input["with_photo"] as? Bool) ?? true
+      let image = withPhoto ? frameProvider() : nil
+      let fix = await LocationContext.shared.currentFix(maxWait: 3)
+      let item = VisualMemoryStore.shared.remember(
+        text: text, image: image, fix: fix, place: LocationContext.shared.placeName)
+      var out = "Remembered: \(VisualMemoryStore.describe(item))."
+      if image == nil, withPhoto { out += " (No camera frame was available, saved without a photo.)" }
+      return out
+
+    case "recall_memory":
+      let query = input["query"] as? String ?? ""
+      let hits = VisualMemoryStore.shared.recall(query: query, limit: 5)
+      guard !hits.isEmpty else {
+        if VisualMemoryStore.shared.items.isEmpty { return "No memories saved yet." }
+        let newest = VisualMemoryStore.shared.recall(query: "", limit: 5).map(VisualMemoryStore.describe)
+        return "Nothing matching '\(query)'. Newest memories:\n" + newest.joined(separator: "\n")
+      }
+      var blocks: [[String: Any]] = [["type": "text", "text": "Matching memories (newest first):\n" + hits.map(VisualMemoryStore.describe).joined(separator: "\n")]]
+      if let image = VisualMemoryStore.shared.image(for: hits[0]), let jpeg = ClaudeClient.jpeg(image, maxSide: 800) {
+        blocks.append(["type": "text", "text": "Photo of the first match:"])
+        blocks.append(ClaudeClient.imageBlock(jpeg))
+      }
+      return blocks
+
+    case "forget_memory":
+      let prefix = input["id"] as? String ?? ""
+      guard let item = VisualMemoryStore.shared.items.first(where: { $0.id.hasPrefix(prefix) && !prefix.isEmpty }) else {
+        return "No memory with id \(prefix)."
+      }
+      VisualMemoryStore.shared.forget(id: item.id)
+      return "Forgot: \(item.text)."
+
+    case "navigate":
+      if let id = input["memory_id"] as? String, !id.isEmpty,
+        let item = VisualMemoryStore.shared.items.first(where: { $0.id.hasPrefix(id) }),
+        let lat = item.latitude, let lon = item.longitude
+      {
+        return await Navigator.navigate(latitude: lat, longitude: lon, label: item.text)
+      }
+      return await Navigator.navigate(to: input["destination"] as? String ?? "")
+
+    case "where_am_i":
+      LocationContext.shared.start()
+      if let fix = await LocationContext.shared.currentFix(maxWait: 4) {
+        let place = LocationContext.shared.placeName
+        return "Location: \(place.isEmpty ? "unknown place" : place) at \(String(format: "%.5f, %.5f", fix.latitude, fix.longitude)). Time now: \(IsraelClock.nowLine)."
+      }
+      return LocationContext.shared.authorized
+        ? "No GPS fix yet. Time now: \(IsraelClock.nowLine)."
+        : "Location is off — Nave can allow it in iPhone Settings → Nave Glasses → Location. Time now: \(IsraelClock.nowLine)."
+
     default:
       return "Unknown tool \(name)."
     }
+  }
+
+  private static func int(_ value: Any?) -> Int? {
+    if let i = value as? Int { return i }
+    if let d = value as? Double { return Int(d) }
+    if let s = value as? String { return Int(s.trimmingCharacters(in: .whitespaces)) }
+    return nil
   }
 
   // MARK: - Contacts

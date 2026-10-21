@@ -205,14 +205,21 @@ final class ObsStreamer {
     guard let jpeg = image.jpegData(compressionQuality: 0.7), let socket else { return }
     sending = true
     lastSent = Date()
-    socket.send(.data(jpeg)) { [weak self] error in
-      Task { @MainActor in
-        guard let self else { return }
-        self.sending = false
-        if error != nil {
-          self.socket?.cancel()
-          self.socket = nil
-        }
+    // async send: a completion closure here could be inferred @MainActor and
+    // would then trap when URLSession calls it on its own queue.
+    Task { [weak self] in
+      let failed: Bool
+      do {
+        try await socket.send(.data(jpeg))
+        failed = false
+      } catch {
+        failed = true
+      }
+      guard let self else { return }
+      self.sending = false
+      if failed, self.socket === socket {
+        self.socket?.cancel()
+        self.socket = nil
       }
     }
   }
