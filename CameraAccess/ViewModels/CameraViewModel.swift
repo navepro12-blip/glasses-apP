@@ -622,6 +622,32 @@ final class CameraViewModel {
     if state == .stopped {
       endBackgroundStopErrorSuppression()
       cleanupSession()
+      scheduleAutoReconnect(reason: "session stopped")
+    }
+  }
+
+  @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+  @ObservationIgnored private var reconnectTimes: [Date] = []
+
+  /// The glasses end the session on their own (taken off, Meta AI took over,
+  /// idle). Quietly start a new one while the glasses are still active.
+  private func scheduleAutoReconnect(reason: String) {
+    guard AssistantSettings.shared.autoConnect, !userEndedSession else { return }
+    reconnectTimes = reconnectTimes.filter { Date().timeIntervalSince($0) < 120 }
+    guard reconnectTimes.count < 6 else {
+      DiagLog.log("auto: too many reconnects in 2 min — waiting for the glasses to come back")
+      return
+    }
+    let delay = [2.0, 3, 5, 8, 13, 21][min(reconnectTimes.count, 5)]
+    reconnectTask?.cancel()
+    reconnectTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .seconds(delay))
+      guard let self, !Task.isCancelled, !self.hasSession, !self.userEndedSession,
+        AssistantSettings.shared.autoConnect, self.hasActiveDevice
+      else { return }
+      self.reconnectTimes.append(Date())
+      DiagLog.log("auto: reconnecting after '\(reason)' (try \(self.reconnectTimes.count))")
+      self.startSession()
     }
   }
 
@@ -630,6 +656,15 @@ final class CameraViewModel {
     // still emit teardown errors while that stop converges, and surfacing those
     // would show a false "something went wrong" alert on return.
     guard !isStoppingForBackground else { return }
+    let text = error.localizedDescription
+    DiagLog.log("session error: \(text)")
+    // Device-side endings are routine (glasses removed, Meta AI took over):
+    // no alert, just reconnect quietly.
+    let lower = text.lowercased()
+    if lower.contains("ended by device") || lower.contains("not connected") || lower.contains("disconnect") {
+      scheduleAutoReconnect(reason: text)
+      return
+    }
     // All session errors surface through the single alert, including
     // `datAppOnTheGlassesUpdateRequired`, which the SDK delivers as a one-shot event.
     showError(error.localizedDescription)
