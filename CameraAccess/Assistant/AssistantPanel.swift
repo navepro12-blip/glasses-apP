@@ -9,6 +9,7 @@ import UIKit
 struct AssistantPanel: View {
   let frameProvider: @MainActor () -> UIImage?
   let stillProvider: @MainActor () async -> UIImage?
+  let sessionReady: Bool
   @State private var chat = LiveChatReader.shared
   @State private var vm = AssistantViewModel.shared
   @State private var showSettings = false
@@ -116,7 +117,11 @@ struct AssistantPanel: View {
           .foregroundStyle(.white.opacity(0.8))
       }
     }
-    .onAppear { vm.attach(frameProvider: frameProvider, stillProvider: stillProvider) }
+    .onAppear {
+      vm.attach(frameProvider: frameProvider, stillProvider: stillProvider)
+      vm.setSessionReady(sessionReady)
+    }
+    .onChange(of: sessionReady) { _, ready in vm.setSessionReady(ready) }
     .sheet(isPresented: $showSettings, onDismiss: { vm.refreshKeyState() }) {
       AssistantSettingsView()
     }

@@ -19,7 +19,12 @@ enum ClaudeError: LocalizedError {
   var errorDescription: String? {
     switch self {
     case .missingKey: return "חסר מפתח API של Anthropic. הוסף אותו בהגדרות ⚙︎."
-    case .http(let code, let body): return "שגיאה מ-Claude (\(code)): \(body.prefix(200))"
+    case .http(let code, let body):
+      if body.contains("thinking") || body.contains("signature") { return "שגיאת שיחה (\(code)) — נסה שוב" }
+      if code == 401 { return "מפתח Anthropic לא תקין (401)" }
+      if code == 429 { return "Claude עמוס (429) — נסה שוב" }
+      if code == 529 || code >= 500 { return "Claude לא זמין כרגע (\(code))" }
+      return "שגיאה מ-Claude (\(code))"
     case .empty: return "Claude לא החזיר תשובה."
     }
   }
@@ -44,8 +49,8 @@ struct ClaudeClient {
     The context block below gives the current date/time (Israel) and his location — use it for \
     "what time is it", relative times ("in an hour", "tomorrow at five"), weather and "near me" \
     questions (web_search with the place name). \
-    Tools: web_search — anything current (silver/gold prices per gram, exchange rates, weather, news, \
-    opening hours). look_closer — a sharp full-resolution photo when details matter (inclusions, \
+    Tools: web_search — ONLY when the answer truly needs live data (silver/gold price now, exchange \
+    rate, weather, news, opening hours); never for general knowledge, translation, or what he sees. look_closer — a sharp full-resolution photo when details matter (inclusions, \
     hallmarks, small text). add_reminder / list_reminders — Apple Reminders ("תזכיר לי בחמש להתקשר \
     לספק" → due_at computed from the context time). get_agenda / add_event — his Apple Calendar \
     ("מה יש לי היום?"). set_timer / timers — spoken timers ("טיימר לעשר דקות", pickling, polishing, \
@@ -235,43 +240,182 @@ struct ClaudeClient {
     ],
   ] }
 
+  /// Streams the answer. `onText` receives text deltas as they arrive (the
+  /// caller speaks sentence by sentence). Returns the complete answer text.
   @MainActor
-  func ask(history: [ChatTurn], question: String, imageJPEG: Data?) async throws -> String {
+  func ask(
+    history: [ChatTurn], question: String, imageJPEG: Data?,
+    onText: @MainActor (String) -> Void = { _ in }
+  ) async throws -> String {
     guard !apiKey.isEmpty else { throw ClaudeError.missingKey }
 
+    // Cross-turn history is plain text only: thinking / tool blocks are bound
+    // to the model and conversation that produced them and must not be replayed.
     var messages: [[String: Any]] = history.map { ["role": $0.role, "content": $0.text] }
     var content: [[String: Any]] = []
     if let jpeg = imageJPEG { content.append(Self.imageBlock(jpeg)) }
     content.append(["type": "text", "text": question])
     messages.append(["role": "user", "content": content])
 
-    for _ in 0..<6 {
-      let json = try await send(messages)
-      let blocks = json["content"] as? [[String: Any]] ?? []
-      let stop = json["stop_reason"] as? String ?? ""
-      messages.append(["role": "assistant", "content": blocks])
+    var spoken = ""
+    var retriedWithoutThinking = false
+    var round = 0
+    while round < 6 {
+      round += 1
+      let result: StreamResult
+      do {
+        result = try await stream(messages) { delta in
+          spoken += delta
+          onText(delta)
+        }
+      } catch ClaudeError.http(let code, let body) where code == 400 && !retriedWithoutThinking
+        && (body.contains("thinking") || body.contains("signature"))
+      {
+        // A thinking block from an earlier round was rejected (e.g. the model
+        // changed): drop thinking blocks from the loop and try once more.
+        retriedWithoutThinking = true
+        DiagLog.log("claude: 400 on thinking/signature — retrying without thinking blocks")
+        messages = messages.map { msg in
+          guard msg["role"] as? String == "assistant", let blocks = msg["content"] as? [[String: Any]] else { return msg }
+          var m = msg
+          m["content"] = blocks.filter { !Self.isThinking($0) }
+          return m
+        }
+        round -= 1
+        continue
+      }
+      messages.append(["role": "assistant", "content": result.blocks])
 
-      if stop == "tool_use", let tools {
+      if result.stopReason == "tool_use", let tools {
         var results: [[String: Any]] = []
-        for block in blocks where block["type"] as? String == "tool_use" {
+        for block in result.blocks where block["type"] as? String == "tool_use" {
           let id = block["id"] as? String ?? ""
           let name = block["name"] as? String ?? ""
           let input = block["input"] as? [String: Any] ?? [:]
+          DiagLog.log("claude: tool \(name)")
           let output = await tools.run(name: name, input: input)
           results.append(["type": "tool_result", "tool_use_id": id, "content": output])
         }
         messages.append(["role": "user", "content": results])
+        // Text spoken before the tool call stays; separate it from what follows.
+        if !spoken.isEmpty, !spoken.hasSuffix(" ") { spoken += " " }
         continue
       }
-      if stop == "pause_turn" { continue }
+      if result.stopReason == "pause_turn" { continue }
 
-      let text = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
-        .joined(separator: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
+      let text = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !text.isEmpty else { throw ClaudeError.empty }
       return text
     }
     throw ClaudeError.empty
+  }
+
+  static func isThinking(_ block: [String: Any]) -> Bool {
+    let t = block["type"] as? String ?? ""
+    return t == "thinking" || t == "redacted_thinking"
+  }
+
+  struct StreamResult {
+    var blocks: [[String: Any]]
+    var stopReason: String
+  }
+
+  /// One streamed Messages API call (SSE). Rebuilds the assistant content
+  /// blocks so the tool-use loop can replay them.
+  @MainActor
+  private func stream(_ messages: [[String: Any]], onText: @MainActor (String) -> Void) async throws -> StreamResult {
+    var body: [String: Any] = [
+      "model": model,
+      "max_tokens": 400,
+      "stream": true,
+      "system": Self.systemPrompt + "\n\n" + Self.contextBlock,
+      "messages": messages,
+    ]
+    if tools != nil { body["tools"] = Self.toolDefinitions }
+
+    var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 60
+    request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+    request.setValue("application/json", forHTTPHeaderField: "content-type")
+    request.setValue("text/event-stream", forHTTPHeaderField: "accept")
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+    let t0 = Date()
+    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    guard code == 200 else {
+      var data = Data()
+      for try await b in bytes { data.append(b) }
+      let text = String(data: data, encoding: .utf8) ?? ""
+      DiagLog.log("claude: HTTP \(code) \(text.prefix(300))")
+      throw ClaudeError.http(code, text)
+    }
+
+    var blocks: [[String: Any]] = []
+    var partialJSON: [Int: String] = [:]
+    var stopReason = ""
+    var firstToken = true
+    var eventName = ""
+    for try await line in bytes.lines {
+      if line.hasPrefix("event:") {
+        eventName = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
+        continue
+      }
+      guard line.hasPrefix("data:") else { continue }
+      let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+      guard let data = payload.data(using: .utf8),
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else { continue }
+      let type = json["type"] as? String ?? eventName
+      switch type {
+      case "content_block_start":
+        let index = json["index"] as? Int ?? blocks.count
+        var block = json["content_block"] as? [String: Any] ?? [:]
+        if block["type"] as? String == "text" { block["text"] = "" }
+        while blocks.count <= index { blocks.append([:]) }
+        blocks[index] = block
+      case "content_block_delta":
+        let index = json["index"] as? Int ?? 0
+        guard index < blocks.count, let delta = json["delta"] as? [String: Any] else { continue }
+        switch delta["type"] as? String ?? "" {
+        case "text_delta":
+          let text = delta["text"] as? String ?? ""
+          blocks[index]["text"] = (blocks[index]["text"] as? String ?? "") + text
+          if firstToken {
+            firstToken = false
+            DiagLog.log("claude: first token after \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+          }
+          onText(text)
+        case "input_json_delta":
+          partialJSON[index, default: ""] += delta["partial_json"] as? String ?? ""
+        case "thinking_delta":
+          blocks[index]["thinking"] = (blocks[index]["thinking"] as? String ?? "") + (delta["thinking"] as? String ?? "")
+        case "signature_delta":
+          blocks[index]["signature"] = (blocks[index]["signature"] as? String ?? "") + (delta["signature"] as? String ?? "")
+        default: break
+        }
+      case "content_block_stop":
+        let index = json["index"] as? Int ?? 0
+        if index < blocks.count, let raw = partialJSON[index] {
+          let parsed = raw.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+          blocks[index]["input"] = parsed ?? [:]
+        }
+      case "message_delta":
+        if let delta = json["delta"] as? [String: Any], let stop = delta["stop_reason"] as? String {
+          stopReason = stop
+        }
+      case "error":
+        let err = json["error"] as? [String: Any]
+        let msg = err?["message"] as? String ?? "stream error"
+        DiagLog.log("claude: stream error \(msg)")
+        throw ClaudeError.http(code, msg)
+      default: break
+      }
+    }
+    DiagLog.log("claude: stream done in \(Int(Date().timeIntervalSince(t0) * 1000)) ms, stop=\(stopReason), blocks=\(blocks.count)")
+    return StreamResult(blocks: blocks, stopReason: stopReason)
   }
 
   /// Live facts appended to the system prompt on every request.
@@ -287,33 +431,6 @@ struct ClaudeClient {
 
   static func imageBlock(_ jpeg: Data) -> [String: Any] {
     ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": jpeg.base64EncodedString()]]
-  }
-
-  @MainActor
-  private func send(_ messages: [[String: Any]]) async throws -> [String: Any] {
-    var body: [String: Any] = [
-      "model": model,
-      "max_tokens": 700,
-      "system": Self.systemPrompt + "\n\n" + Self.contextBlock,
-      "messages": messages,
-    ]
-    if tools != nil { body["tools"] = Self.toolDefinitions }
-
-    var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-    request.httpMethod = "POST"
-    request.timeoutInterval = 60
-    request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-    request.setValue("application/json", forHTTPHeaderField: "content-type")
-    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-    let (data, response) = try await URLSession.shared.data(for: request)
-    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-    guard code == 200 else {
-      throw ClaudeError.http(code, String(data: data, encoding: .utf8) ?? "")
-    }
-    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw ClaudeError.empty }
-    return json
   }
 
   /// Downscale to ~1024px on the long side and JPEG-encode to keep uploads fast.

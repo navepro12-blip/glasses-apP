@@ -13,11 +13,22 @@ import Foundation
 final class SpeechOutput: NSObject {
   static let shared = SpeechOutput()
 
-  private var queue: [String] = []
+  /// Queued sentence with its audio being fetched ahead of time (prefetch), so
+  /// the next sentence is ready while the current one plays.
+  private struct Item {
+    let text: String
+    let audio: Task<Data?, Never>
+    let enqueued: Date
+  }
+
+  private var queue: [Item] = []
   private var isSpeaking = false
   private var player: AVAudioPlayer?
   private let synth = AVSpeechSynthesizer()
   private var finish: CheckedContinuation<Void, Never>?
+  /// Reference time for latency logging ("end of speech"); set by the view model.
+  var traceStart: Date?
+  private var loggedFirstPlayback = false
 
   /// Set when the last cloud voice request failed, so the UI can show why it fell back.
   private(set) var lastVoiceError: String?
@@ -30,7 +41,9 @@ final class SpeechOutput: NSObject {
   func enqueue(_ text: String) {
     let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !clean.isEmpty else { return }
-    queue.append(clean)
+    // Start synthesis right away (prefetch); playback happens in order.
+    let audio = Task { await self.fetchAudio(clean) }
+    queue.append(Item(text: clean, audio: audio, enqueued: Date()))
     // Flip the flag synchronously: two enqueues in the same tick must not
     // start two drain loops (they would fight over the single continuation).
     if !isSpeaking {
@@ -40,14 +53,23 @@ final class SpeechOutput: NSObject {
   }
 
   func stopAll() {
+    queue.forEach { $0.audio.cancel() }
     queue.removeAll()
     player?.stop()
     synth.stopSpeaking(at: .immediate)
     resume()
   }
 
+  /// Marks the start of a new answer for latency logging.
+  func beginTrace(at date: Date) {
+    traceStart = date
+    loggedFirstPlayback = false
+  }
+
   var queuedCount: Int { queue.count }
   var isBusy: Bool { isSpeaking || !queue.isEmpty }
+  /// True only while sound is really coming out (used to ignore our own voice).
+  var isActuallyPlaying: Bool { (player?.isPlaying ?? false) || synth.isSpeaking }
 
   /// Waits until everything queued has been spoken (bounded).
   func waitUntilIdle(maxSeconds: Double = 60) async {
@@ -60,11 +82,63 @@ final class SpeechOutput: NSObject {
   private func drain() async {
     isSpeaking = true
     AudioRoute.activateForPlayback()
+    let drainStart = Date()
     while !queue.isEmpty {
-      let text = queue.removeFirst()
-      await speakOne(text)
+      if Date().timeIntervalSince(drainStart) > 120 {
+        DiagLog.log("tts: watchdog — queue running for 2 min, dropping \(queue.count) items")
+        queue.forEach { $0.audio.cancel() }
+        queue.removeAll()
+        break
+      }
+      let item = queue.removeFirst()
+      let audio = await item.audio.value
+      if Task.isCancelled { break }
+      let waited = Int(Date().timeIntervalSince(item.enqueued) * 1000)
+      if let audio {
+        DiagLog.log("tts: play \(audio.count) bytes (ready \(waited) ms after enqueue)\(sinceTrace())")
+        await play(audio)
+      } else {
+        DiagLog.log("tts: apple voice (\(waited) ms after enqueue)\(sinceTrace())")
+        await speakWithApple(item.text)
+      }
     }
     isSpeaking = false
+  }
+
+  private func sinceTrace() -> String {
+    guard let traceStart, !loggedFirstPlayback else { return "" }
+    loggedFirstPlayback = true
+    return " — FIRST PLAYBACK \(Int(Date().timeIntervalSince(traceStart) * 1000)) ms after end of speech"
+  }
+
+  /// Fetches audio from the chosen provider; nil means "use the iPhone voice".
+  private func fetchAudio(_ text: String) async -> Data? {
+    let s = AssistantSettings.shared
+    let t0 = Date()
+    func ms() -> Int { Int(Date().timeIntervalSince(t0) * 1000) }
+    do {
+      let audio: Data?
+      switch s.voiceProvider {
+      case .apple:
+        return nil
+      case .pc:
+        audio = try await PCVoiceTTS.synthesize(text: text, baseURL: s.pcURL, voice: s.pcVoice)
+      case .azure:
+        audio = try await AzureTTS.synthesize(
+          text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
+      case .eleven:
+        audio = try await ElevenTTS.synthesize(text: text, key: s.elevenKey, voiceID: s.elevenVoiceID)
+      case .gemini:
+        audio = try await GeminiTTS.synthesize(text: text, key: s.geminiKey, voice: s.geminiVoice)
+      }
+      lastVoiceError = nil
+      DiagLog.log("tts: \(s.voiceProvider.rawValue) \(text.count) chars → \(audio?.count ?? 0) bytes in \(ms()) ms")
+      return audio
+    } catch {
+      lastVoiceError = error.localizedDescription
+      DiagLog.log("tts: \(s.voiceProvider.rawValue) failed after \(ms()) ms: \(error.localizedDescription)")
+      return nil
+    }
   }
 
   /// Awaits `finish`, but never forever: a player/synth that fails to call
@@ -81,42 +155,6 @@ final class SpeechOutput: NSObject {
       start()
     }
     timeout.cancel()
-  }
-
-  private func speakOne(_ text: String) async {
-    let s = AssistantSettings.shared
-    let t0 = Date()
-    func ms() -> Int { Int(Date().timeIntervalSince(t0) * 1000) }
-    DiagLog.log("tts: \(s.voiceProvider.rawValue) request \(text.count) chars")
-    do {
-      let audio: Data?
-      switch s.voiceProvider {
-      case .apple:
-        audio = nil
-      case .pc:
-        audio = try await PCVoiceTTS.synthesize(text: text, baseURL: s.pcURL, voice: s.pcVoice)
-      case .azure:
-        audio = try await AzureTTS.synthesize(
-          text: text, key: s.azureKey, region: s.azureRegion, hebrewVoice: s.hebrewVoice.rawValue)
-      case .eleven:
-        audio = try await ElevenTTS.synthesize(text: text, key: s.elevenKey, voiceID: s.elevenVoiceID)
-      case .gemini:
-        audio = try await GeminiTTS.synthesize(text: text, key: s.geminiKey, voice: s.geminiVoice)
-      }
-      if let audio {
-        lastVoiceError = nil
-        DiagLog.log("tts: audio ready after \(ms()) ms (\(audio.count) bytes) — playing")
-        await play(audio)
-        DiagLog.log("tts: playback done at \(ms()) ms")
-        return
-      }
-    } catch {
-      lastVoiceError = error.localizedDescription
-      DiagLog.log("tts: \(s.voiceProvider.rawValue) failed after \(ms()) ms: \(error.localizedDescription)")
-    }
-    DiagLog.log("tts: apple voice start at \(ms()) ms")
-    await speakWithApple(text)
-    DiagLog.log("tts: apple voice done at \(ms()) ms")
   }
 
   private func play(_ data: Data) async {

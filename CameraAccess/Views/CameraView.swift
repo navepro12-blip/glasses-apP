@@ -84,7 +84,8 @@ struct CameraView: View {
 
         AssistantPanel(
           frameProvider: { [viewModel] in viewModel.currentVideoFrame },
-          stillProvider: { [viewModel] in await viewModel.captureStillForAI() }
+          stillProvider: { [viewModel] in await viewModel.captureStillForAI() },
+          sessionReady: viewModel.sessionState == .started
         )
           .padding(.horizontal, 20)
           .padding(.bottom, 4)

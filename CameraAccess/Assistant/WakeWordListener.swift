@@ -21,7 +21,7 @@
 //
 
 @preconcurrency import AVFoundation
-import AudioToolbox
+import UIKit
 import Foundation
 @preconcurrency import Speech
 
@@ -59,6 +59,12 @@ final class WakeWordListener {
   private var inputUID = ""
   /// Set after repeated failures on the glasses mic: use the iPhone mic instead.
   private(set) var fellBackToPhoneMic = false
+  private var armedAt = Date.distantPast
+  private var hardStopTask: Task<Void, Never>?
+  private var loggedIgnoreReason = ""
+  /// The engine stays running between questions so the Bluetooth route (HFP)
+  /// doesn't flap A2DP ↔ HFP on every answer — each flip costs 1–2 s.
+  private var heldFormat: AVAudioFormat?
 
   func start(language: ListenLanguage) async throws {
     guard !isRunning else { return }
@@ -79,19 +85,28 @@ final class WakeWordListener {
     try beginRecognition()
   }
 
-  func stop() {
-    if isRunning { DiagLog.log("wake: stop") }
+  /// Stops recognising. With `keepRoute` the audio engine keeps running (no
+  /// tap) so the glasses stay on the HFP route while Claude thinks and talks.
+  func stop(keepRoute: Bool = false) {
+    if isRunning { DiagLog.log("wake: stop keepRoute=\(keepRoute)") }
     isRunning = false
-    AudioRoute.assistantListening = false
     observers.forEach { NotificationCenter.default.removeObserver($0) }
     observers.removeAll()
     silenceTask?.cancel()
     recycleTask?.cancel()
     restartTask?.cancel()
+    hardStopTask?.cancel()
     silenceTask = nil
     recycleTask = nil
     restartTask = nil
-    tearDown()
+    hardStopTask = nil
+    tearDown(keepEngine: keepRoute)
+    if !keepRoute { AudioRoute.assistantListening = false }
+  }
+
+  /// Fully releases the microphone (app to background, listening switched off).
+  func releaseEngine() {
+    stop(keepRoute: false)
   }
 
   // MARK: - Audio route / engine changes
@@ -178,7 +193,7 @@ final class WakeWordListener {
   // MARK: - Recognition
 
   private func beginRecognition() throws {
-    tearDown()
+    tearDown(keepEngine: true)
     guard isRunning else { return }
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language.rawValue)),
       recognizer.isAvailable
@@ -206,33 +221,60 @@ final class WakeWordListener {
     req.contextualStrings = WakeWord.contextualStrings
     request = req
 
-    let newEngine = AVAudioEngine()
-    let input = newEngine.inputNode
-    let format = input.outputFormat(forBus: 0)
-    // While Bluetooth is switching the mic reports 0 Hz — installing a tap
-    // then crashes the app. Retry shortly instead.
-    guard format.sampleRate > 0, format.channelCount > 0 else {
-      request = nil
-      DiagLog.log("wake: input format 0 Hz, retrying")
-      onStatus?("ממתין למיקרופון…")
-      scheduleRestart(after: .milliseconds(900), reason: nil)
-      return
+    // Reuse the engine held running since the last question when its format
+    // is unchanged (keeps the HFP route up); otherwise build a fresh one.
+    var reused = false
+    if let held = engine, held.isRunning, let heldFormat {
+      let now = held.inputNode.outputFormat(forBus: 0)
+      if now.sampleRate == heldFormat.sampleRate, now.channelCount == heldFormat.channelCount, now.sampleRate > 0 {
+        reused = true
+      } else {
+        held.inputNode.removeTap(onBus: 0)
+        held.stop()
+        engine = nil
+        self.heldFormat = nil
+      }
     }
-    engine = newEngine
-    Self.installTap(on: input, format: format, request: req)
-    newEngine.prepare()
-    do {
-      try newEngine.start()
-    } catch {
-      newEngine.inputNode.removeTap(onBus: 0)
-      engine = nil
-      request = nil
-      throw error
+    let activeEngine: AVAudioEngine
+    let format: AVAudioFormat
+    if reused, let held = engine {
+      activeEngine = held
+      format = held.inputNode.outputFormat(forBus: 0)
+      Self.installTap(on: held.inputNode, format: format, request: req)
+    } else {
+      let newEngine = AVAudioEngine()
+      let input = newEngine.inputNode
+      format = input.outputFormat(forBus: 0)
+      // While Bluetooth is switching the mic reports 0 Hz — installing a tap
+      // then crashes the app. Retry shortly instead.
+      guard format.sampleRate > 0, format.channelCount > 0 else {
+        request = nil
+        DiagLog.log("wake: input format 0 Hz, retrying")
+        onStatus?("ממתין למיקרופון…")
+        scheduleRestart(after: .milliseconds(900), reason: nil)
+        return
+      }
+      engine = newEngine
+      heldFormat = format
+      Self.installTap(on: input, format: format, request: req)
+      newEngine.prepare()
+      do {
+        try newEngine.start()
+      } catch {
+        newEngine.inputNode.removeTap(onBus: 0)
+        engine = nil
+        heldFormat = nil
+        request = nil
+        throw error
+      }
+      activeEngine = newEngine
     }
+    _ = activeEngine
     let port = AVAudioSession.sharedInstance().currentRoute.inputs.first
     inputUID = port?.uid ?? ""
     let route = port?.portName ?? "?"
-    DiagLog.log("wake: engine started gen=\(gen) fmt=\(Int(format.sampleRate))Hz/\(format.channelCount)ch route=\(route) \(DiagLog.sessionLine())")
+    loggedIgnoreReason = ""
+    DiagLog.log("wake: engine \(reused ? "reused" : "started") gen=\(gen) fmt=\(Int(format.sampleRate))Hz/\(format.channelCount)ch input=\(route)/\(port?.portType.rawValue ?? "?") \(DiagLog.sessionLine())")
     onStatus?("👂 מקשיב דרך: \(route)\(fellBackToPhoneMic ? " (אייפון)" : "")")
 
     let started = Date()
@@ -244,7 +286,7 @@ final class WakeWordListener {
           if self.partialCount == 1 {
             DiagLog.log("wake: first partial after \(Int(Date().timeIntervalSince(started) * 1000)) ms: \(text.prefix(40))")
           }
-          self.handle(text)
+          self.handle(text, final: ended && errorText == nil)
         }
         if ended {
           let life = Date().timeIntervalSince(started)
@@ -286,43 +328,83 @@ final class WakeWordListener {
     }
   }
 
-  private func handle(_ text: String) {
+  private func handle(_ text: String, final: Bool) {
     onRaw?(String(text.suffix(60)))
-    // Don't wake on our own voice (answers / live chat read aloud).
-    if !armed, SpeechOutput.shared.isBusy { return }
-    guard let tail = WakeWord.commandAfterWakeWord(in: text) else { return }
-    if !armed {
-      DiagLog.log("wake: WAKE WORD in '\(text.suffix(40))'")
-      onWake?()
+    // Don't wake on our own voice (answers / live chat read aloud) — but only
+    // while audio is really playing, never because of a stuck flag.
+    if !armed, SpeechOutput.shared.isActuallyPlaying {
+      logIgnored("speaking (our own voice is playing)")
+      return
     }
-    armed = true
+    guard let tail = WakeWord.commandAfterWakeWord(in: text) else {
+      logIgnored("no wake word in '\(text.suffix(30))'")
+      return
+    }
+    if !armed {
+      DiagLog.log("wake: MATCHED in '\(text.suffix(40))' tail='\(tail)'")
+      armed = true
+      armedAt = Date()
+      onWake?()
+      // Hard cap: never wait more than 7 s after the wake word even if the
+      // recogniser keeps revising the text.
+      hardStopTask?.cancel()
+      hardStopTask = Task { [weak self] in
+        try? await Task.sleep(for: .seconds(7))
+        guard let self, !Task.isCancelled, self.isRunning, self.armed else { return }
+        DiagLog.log("wake: hard cap reached — sending")
+        self.fire()
+      }
+    }
+    let changed = tail != command
     command = tail
     onPartial?(command)
 
-    // Finish when the speaker pauses: 1.4 s after the last change with a
-    // question, or 3 s if only the wake word was said.
+    if final {
+      DiagLog.log("wake: recogniser final — sending")
+      fire()
+      return
+    }
+    // Finish when the speaker pauses: 0.9 s after the last *change* with a
+    // question, or 2.5 s if only the wake word was said. Identical re-sent
+    // partials don't reset the timer.
+    guard changed || silenceTask == nil else { return }
     silenceTask?.cancel()
-    let wait: Duration = command.isEmpty ? .seconds(3) : .milliseconds(1400)
+    let wait: Duration = command.isEmpty ? .milliseconds(2500) : .milliseconds(900)
     silenceTask = Task { [weak self] in
       try? await Task.sleep(for: wait)
       guard let self, !Task.isCancelled, self.isRunning, self.armed else { return }
-      let heard = self.command
-      DiagLog.log("wake: command '\(heard)'")
-      self.stop()
-      if heard.isEmpty { self.onWakeOnly?() } else { self.onCommand?(heard) }
+      self.fire()
     }
   }
 
-  private func tearDown() {
+  /// Delivers the captured command (or wake-only) exactly once.
+  private func fire() {
+    guard isRunning, armed else { return }
+    let heard = command
+    DiagLog.log("wake: command '\(heard)' \(Int(Date().timeIntervalSince(armedAt) * 1000)) ms after wake")
+    stop(keepRoute: true)
+    if heard.isEmpty { onWakeOnly?() } else { onCommand?(heard) }
+  }
+
+  private func logIgnored(_ reason: String) {
+    // One line per reason per session, so the log isn't flooded by partials.
+    let key = String(reason.prefix(12))
+    guard key != loggedIgnoreReason else { return }
+    loggedIgnoreReason = key
+    DiagLog.log("wake: ignored — \(reason)")
+  }
+
+  private func tearDown(keepEngine: Bool = false) {
     task?.cancel()
     task = nil
     request?.endAudio()
     request = nil
-    if let engine {
-      engine.inputNode.removeTap(onBus: 0)
-      if engine.isRunning { engine.stop() }
-    }
-    engine = nil
+    guard let engine else { return }
+    engine.inputNode.removeTap(onBus: 0)
+    if keepEngine, engine.isRunning { return }
+    if engine.isRunning { engine.stop() }
+    self.engine = nil
+    heldFormat = nil
   }
 
   // Built outside the main actor: the tap and result blocks run on audio /
@@ -412,12 +494,25 @@ enum WakeWord {
     return false
   }
 
+  /// Looser spellings the recogniser produces ("כלום", "קלו", "קולד") — accepted
+  /// only when a question follows, so everyday words don't wake us by themselves.
+  static func isLenientWakeToken(_ raw: String) -> Bool {
+    let t = normalize(raw)
+    return t.range(of: "^[קכג][וא]?ל[אוי]{0,2}([דטם][הי]?)?$", options: .regularExpression) != nil
+      || t.range(of: "^[ckg](o|a)?l(a|o|u|au|ou|aw|oa)*(d|de|t|m)?$", options: .regularExpression) != nil && t.count >= 3
+  }
+
   /// Returns the text after the (last) wake word, or nil if it wasn't said.
   /// The command is trimmed of punctuation; an empty string means "name only".
   static func commandAfterWakeWord(in text: String) -> String? {
-    let tokens = text.split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "." || $0 == "!" || $0 == "?" })
+    let tokens = text.split(whereSeparator: { $0.isWhitespace || ",.!?:;״\"'".contains($0) })
       .map(String.init)
-    guard let idx = tokens.lastIndex(where: isWakeToken) else { return nil }
+    var found = tokens.lastIndex(where: isWakeToken)
+    if found == nil, tokens.count >= 2 {
+      // Lenient spelling followed by at least two more words.
+      found = tokens.indices.dropLast(2).last(where: { isLenientWakeToken(tokens[$0]) })
+    }
+    guard let idx = found else { return nil }
     let tail = tokens[(idx + 1)...].joined(separator: " ")
     return tail.trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?:–-;").union(.whitespacesAndNewlines))
   }
@@ -446,15 +541,57 @@ extension Notification.Name {
   static let glassesAudioSessionReleased = Notification.Name("NaveGlasses.audioSessionReleased")
 }
 
-/// Short "I heard you" sound when the wake word is caught.
+/// Earcons played through the app's own AVAudioSession route (the glasses),
+/// not system sounds — those obey the ring/silent switch and never reach
+/// Bluetooth. Short generated tones, with a light haptic on the phone.
+@MainActor
 enum Chime {
-  static func play() {
-    AudioServicesPlaySystemSound(1113)
+  private static var players: [AVAudioPlayer] = []
+  private static var cache: [String: Data] = [:]
+
+  /// Wake word caught: two quick rising notes.
+  static func play() { tone("wake", notes: [(880, 0.07), (1320, 0.09)], volume: 0.5) }
+  /// Question captured / sent: one clear note.
+  static func playDone() { tone("done", notes: [(1046, 0.14)], volume: 0.5) }
+  /// Error: a low double buzz.
+  static func playError() { tone("error", notes: [(330, 0.12), (0, 0.05), (262, 0.16)], volume: 0.6) }
+  /// Timer finished: three notes.
+  static func playTimer() { tone("timer", notes: [(988, 0.12), (0, 0.05), (988, 0.12), (0, 0.05), (1318, 0.22)], volume: 0.7) }
+
+  private static func tone(_ name: String, notes: [(Double, Double)], volume: Float) {
+    let data = cache[name] ?? {
+      let d = render(notes)
+      cache[name] = d
+      return d
+    }()
+    guard let p = try? AVAudioPlayer(data: data) else {
+      DiagLog.log("chime: \(name) could not be created")
+      return
+    }
+    p.volume = volume
+    players.removeAll { !$0.isPlaying }
+    players.append(p)
+    let ok = p.play()
+    DiagLog.log("chime: \(name) \(ok ? "playing" : "FAILED") via \(AVAudioSession.sharedInstance().currentRoute.outputs.first?.portName ?? "?")")
+    UIImpactFeedbackGenerator(style: name == "error" ? .heavy : .light).impactOccurred()
   }
-  static func playDone() {
-    AudioServicesPlaySystemSound(1114)
-  }
-  static func playTimer() {
-    AudioServicesPlaySystemSound(1005)
+
+  /// 16 kHz mono 16-bit sine notes with a short fade so they don't click.
+  private static func render(_ notes: [(Double, Double)]) -> Data {
+    let rate = 16000.0
+    var pcm = Data()
+    for (freq, seconds) in notes {
+      let n = Int(rate * seconds)
+      let fade = max(1, Int(rate * 0.008))
+      for i in 0..<n {
+        var amp = 0.8
+        if i < fade { amp *= Double(i) / Double(fade) }
+        if i > n - fade { amp *= Double(n - i) / Double(fade) }
+        let v = freq == 0 ? 0.0 : sin(2 * .pi * freq * Double(i) / rate) * amp
+        var sample = Int16(max(-32767, min(32767, v * 32767)))
+        pcm.append(Data(bytes: &sample, count: 2))
+      }
+    }
+    return GeminiTTS.wav(pcm: pcm, sampleRate: UInt32(rate))
   }
 }
