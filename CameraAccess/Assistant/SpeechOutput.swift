@@ -41,6 +41,14 @@ final class SpeechOutput: NSObject {
     return spokenRecently.reduce(into: Set<String>()) { $0.formUnion($1.1) }
   }
 
+  /// Words in `text` that we did NOT just say (i.e. the user talking over us).
+  func newWordCount(_ text: String) -> Int {
+    let words = text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { WakeWord.normalize(String($0)) }
+      .filter { $0.count >= 2 }
+    let spoken = recentlySpokenTokens
+    return words.filter { !spoken.contains($0) }.count
+  }
+
   /// True when most of `text` was just spoken by us (echo through the glasses mic).
   func looksLikeEcho(_ text: String) -> Bool {
     let words = text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map { WakeWord.normalize(String($0)) }

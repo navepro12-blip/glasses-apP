@@ -358,7 +358,17 @@ final class WakeWordListener {
       logIgnored("echo of our own voice: '\(text.suffix(30))'")
       return
     }
-    guard let tail = WakeWord.commandAfterWakeWord(in: text) else {
+    var wakeTail = WakeWord.commandAfterWakeWord(in: text)
+    // Barge-in by voice: he starts talking while Noa is speaking — his voice
+    // wins. Two or more words that aren't our own echo interrupt her and
+    // become the new question.
+    if wakeTail == nil, !armed, conversationActive, SpeechOutput.shared.isActuallyPlaying,
+      SpeechOutput.shared.newWordCount(text) >= 2
+    {
+      DiagLog.log("wake: BARGE-IN by voice '\(text.suffix(30))'")
+      wakeTail = text
+    }
+    guard let tail = wakeTail else {
       logIgnored("no wake word in '\(text.suffix(30))'")
       return
     }
