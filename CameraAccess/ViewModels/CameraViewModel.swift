@@ -176,6 +176,74 @@ final class CameraViewModel {
   /// True from a Claude photo request until its photo arrives (even after the
   /// request timed out), so the late photo never opens the share sheet.
   @ObservationIgnored private var aiPhotoPending = false
+  /// Latest decoded frame regardless of app state (for Claude; the preview
+  /// surface only updates in the foreground).
+  @ObservationIgnored private(set) var latestFrame: UIImage?
+  /// The stream was started by a snapshot / Live mode, not by the user.
+  @ObservationIgnored private var streamOwnedByAI = false
+  @ObservationIgnored private(set) var liveStreamActive = false
+
+  /// "What am I looking at": grab one good frame even when the preview is off —
+  /// starts the glasses camera, waits for the first frames, takes a still,
+  /// and stops the camera again if we started it.
+  func snapshotForAI() async -> UIImage? {
+    if isStreaming {
+      return await captureStillForAI() ?? latestFrame ?? currentVideoFrame
+    }
+    guard let session = deviceSession, session.state == .started, camera == nil else {
+      DiagLog.log("snapshot: no started session")
+      return nil
+    }
+    guard (try? await wearables.checkPermissionStatus(.camera)) == .granted else {
+      DiagLog.log("snapshot: camera permission not granted")
+      return nil
+    }
+    let t0 = Date()
+    streamOwnedByAI = true
+    latestFrame = nil
+    beginStream(on: session)
+    let deadline = Date().addingTimeInterval(7)
+    while Date() < deadline, !(isStreaming && latestFrame != nil) {
+      try? await Task.sleep(for: .milliseconds(100))
+    }
+    guard isStreaming, latestFrame != nil else {
+      DiagLog.log("snapshot: no frame after \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+      if streamOwnedByAI, !liveStreamActive { stopStreaming() }
+      streamOwnedByAI = false
+      return latestFrame
+    }
+    // Let auto-exposure settle, then a full-resolution still.
+    try? await Task.sleep(for: .milliseconds(450))
+    let still = await captureStillForAI()
+    let image = still ?? latestFrame
+    DiagLog.log("snapshot: ready in \(Int(Date().timeIntervalSince(t0) * 1000)) ms (still=\(still != nil))")
+    if streamOwnedByAI, !liveStreamActive { stopStreaming() }
+    streamOwnedByAI = false
+    return image
+  }
+
+  /// Live AI mode: keep the glasses camera streaming so Claude sees along.
+  func setLiveStream(_ on: Bool) async -> Bool {
+    if on {
+      liveStreamActive = true
+      if isStreaming { return true }
+      guard let session = deviceSession, session.state == .started else { liveStreamActive = false; return false }
+      guard (try? await wearables.checkPermissionStatus(.camera)) == .granted else {
+        liveStreamActive = false
+        return false
+      }
+      streamOwnedByAI = true
+      if camera == nil { beginStream(on: session) }
+      let deadline = Date().addingTimeInterval(7)
+      while Date() < deadline, !isStreaming { try? await Task.sleep(for: .milliseconds(100)) }
+      return isStreaming
+    } else {
+      liveStreamActive = false
+      if streamOwnedByAI { stopStreaming() }
+      streamOwnedByAI = false
+      return true
+    }
+  }
 
   /// Full-resolution still for Claude ("look closer"), without opening the
   /// share sheet. Returns nil if not streaming or it times out.
@@ -593,6 +661,7 @@ final class CameraViewModel {
 
       Task { @MainActor [weak self] in
         guard let self else { return }
+        if let image = previewImage { self.latestFrame = image }
         // Keep the live surface stable while a capture preview is onscreen.
         if UIApplication.shared.applicationState != .background,
           activePreview == nil,

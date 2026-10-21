@@ -83,8 +83,9 @@ struct CameraView: View {
         Spacer(minLength: 0)
 
         AssistantPanel(
-          frameProvider: { [viewModel] in viewModel.currentVideoFrame },
-          stillProvider: { [viewModel] in await viewModel.captureStillForAI() },
+          frameProvider: { [viewModel] in viewModel.isStreaming ? (viewModel.latestFrame ?? viewModel.currentVideoFrame) : nil },
+          stillProvider: { [viewModel] in await viewModel.snapshotForAI() },
+          liveControl: { [viewModel] on in await viewModel.setLiveStream(on) },
           sessionReady: viewModel.sessionState == .started
         )
           .padding(.horizontal, 20)

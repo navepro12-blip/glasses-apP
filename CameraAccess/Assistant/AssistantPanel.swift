@@ -9,6 +9,7 @@ import UIKit
 struct AssistantPanel: View {
   let frameProvider: @MainActor () -> UIImage?
   let stillProvider: @MainActor () async -> UIImage?
+  let liveControl: @MainActor (Bool) async -> Bool
   let sessionReady: Bool
   @State private var chat = LiveChatReader.shared
   @State private var vm = AssistantViewModel.shared
@@ -16,6 +17,13 @@ struct AssistantPanel: View {
 
   var body: some View {
     VStack(spacing: 10) {
+      if vm.liveMode {
+        Text("🔴 מצב לייב — נועה רואה איתך. תגיד \"עצור לייב\" לסיום")
+          .font(.system(size: 13, weight: .semibold))
+          .foregroundStyle(.white)
+          .padding(.horizontal, 12).padding(.vertical, 6)
+          .background(.red.opacity(0.75), in: Capsule())
+      }
       if !vm.heardText.isEmpty || !vm.answerText.isEmpty || vm.errorText != nil {
         VStack(alignment: .trailing, spacing: 6) {
           if !vm.heardText.isEmpty {
@@ -118,7 +126,7 @@ struct AssistantPanel: View {
       }
     }
     .onAppear {
-      vm.attach(frameProvider: frameProvider, stillProvider: stillProvider)
+      vm.attach(frameProvider: frameProvider, stillProvider: stillProvider, liveControl: liveControl)
       vm.setSessionReady(sessionReady)
     }
     .onChange(of: sessionReady) { _, ready in vm.setSessionReady(ready) }

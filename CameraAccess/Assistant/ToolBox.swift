@@ -14,6 +14,7 @@ import UIKit
 final class ToolBox {
   var frameProvider: @MainActor () -> UIImage? = { nil }
   var stillProvider: @MainActor () async -> UIImage? = { nil }
+  var liveModeControl: @MainActor (Bool) async -> String = { _ in "unavailable" }
 
   /// Returns tool_result content (a string or content blocks).
   func run(name: String, input: [String: Any]) async -> Any {
@@ -157,6 +158,9 @@ final class ToolBox {
         return await Navigator.navigate(latitude: lat, longitude: lon, label: item.text)
       }
       return await Navigator.navigate(to: input["destination"] as? String ?? "")
+
+    case "live_mode":
+      return await liveModeControl((input["action"] as? String) != "stop")
 
     case "distance_to":
       return await Self.distance(to: input["place"] as? String ?? "")

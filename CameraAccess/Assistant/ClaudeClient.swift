@@ -59,7 +59,9 @@ struct ClaudeClient {
     casting); you'll announce when they end. remember_this — save what he sees now with a note and \
     his location ("תזכור שחניתי כאן", "תזכור שהנחתי את האופל במגירה השלישית"); recall_memory — answer \
     "where did I park / put…" from saved memories, describing the photo if useful; navigate — Waze / \
-    Maps to a destination or back to a remembered spot (memory_id). where_am_i — fresh location. distance_to — distance and \
+    Maps to a destination or back to a remembered spot (memory_id). where_am_i — fresh location. live_mode — start/stop Live mode \
+    (continuous camera + conversation; in Live mode keep answers very short and practical, and refer \
+    to what you see in the latest frame). distance_to — distance and \
     driving time from where he is now to a place ("כמה רחוק הקולנוע בקריית ביאליק?"); prefer it over \
     web_search for distance/ETA questions. \
     call_contact / send_whatsapp with Hebrew and English spellings of the name. log_inventory — record \
@@ -229,6 +231,15 @@ struct ClaudeClient {
           "destination": ["type": "string"],
           "memory_id": ["type": "string"],
         ],
+      ],
+    ],
+    [
+      "name": "live_mode",
+      "description": "Start or stop Live mode: the glasses camera keeps streaming and Nave can talk to you continuously without the wake word while you see what he sees (guiding work at the bench, shopping, walking). Use when he says 'מצב לייב', 'תתחילי לייב', 'עצרי לייב'.",
+      "input_schema": [
+        "type": "object",
+        "properties": ["action": ["type": "string", "enum": ["start", "stop"]]],
+        "required": ["action"],
       ],
     ],
     [

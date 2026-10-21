@@ -57,13 +57,23 @@ final class AssistantViewModel {
 
   // MARK: - Setup
 
+  /// Live AI: the camera keeps streaming and every utterance goes to Claude
+  /// with the latest frame, no wake word needed.
+  var liveMode: Bool = false
+  @ObservationIgnored private var liveControl: @MainActor (Bool) async -> Bool = { _ in false }
+  @ObservationIgnored private var liveLastActivity = Date()
+  @ObservationIgnored private var liveWatchdog: Task<Void, Never>?
+
   func attach(
     frameProvider: @escaping @MainActor () -> UIImage?,
-    stillProvider: @escaping @MainActor () async -> UIImage?
+    stillProvider: @escaping @MainActor () async -> UIImage?,
+    liveControl: @escaping @MainActor (Bool) async -> Bool
   ) {
     self.frameProvider = frameProvider
+    self.liveControl = liveControl
     toolBox.frameProvider = frameProvider
     toolBox.stillProvider = stillProvider
+    toolBox.liveModeControl = { [weak self] on in await self?.setLiveMode(on) ?? "unavailable" }
     guard !attached else { return }
     attached = true
 
@@ -298,6 +308,7 @@ final class AssistantViewModel {
   /// passive wake listening.
   private func cancelCurrent(reason: String, chime: Bool, restartWake: Bool) {
     DiagLog.log("state: cancel (\(reason)) from \(phase)")
+    if liveMode, reason != "timeout" { Task { _ = await self.setLiveMode(false, announce: false) } }
     askTask?.cancel()
     askTask = nil
     fillerTask?.cancel()
@@ -362,9 +373,9 @@ final class AssistantViewModel {
 
   /// Waits until the speaker pauses (or nothing is said), then sends. Stop
   /// phrases cancel; silence for `idleTimeoutSeconds` closes the window.
-  private func finishOnSilence(maxSeconds: Double, minSpeechGap: Double) async {
+  private func finishOnSilence(maxSeconds: Double, minSpeechGap: Double, idleOverride: Double? = nil) async {
     let deadline = Date().addingTimeInterval(maxSeconds)
-    let idleLimit = AssistantSettings.shared.idleTimeoutSeconds
+    let idleLimit = idleOverride ?? AssistantSettings.shared.idleTimeoutSeconds
     followUpCancelled = false
     var text = ""
     while phase == .listening, !followUpCancelled, Date() < deadline {
@@ -427,7 +438,13 @@ final class AssistantViewModel {
     resumeWakeListening()
 
     let settings = AssistantSettings.shared
-    let jpeg = settings.useCamera ? frameProvider().flatMap { ClaudeClient.jpeg($0) } : nil
+    var jpeg = settings.useCamera ? frameProvider().flatMap { ClaudeClient.jpeg($0) } : nil
+    if liveMode { liveLastActivity = Date() }
+    if jpeg == nil, settings.useCamera, Self.needsVision(question) {
+      DiagLog.log("snapshot: visual question, grabbing a frame")
+      jpeg = await toolBox.stillProvider().flatMap { ClaudeClient.jpeg($0, maxSide: 1280) }
+      guard !Task.isCancelled else { return }
+    }
     var client = ClaudeClient(apiKey: settings.anthropicKey, model: settings.model.rawValue, tools: toolBox)
     pendingSpeech = ""
     sentencesSpoken = 0
@@ -485,7 +502,7 @@ final class AssistantViewModel {
       guard !Task.isCancelled, phase == .speaking else { return }  // cancelled / barged in
       DiagLog.log("latency: answer fully spoken \(Int(Date().timeIntervalSince(endOfSpeech) * 1000)) ms after end of speech")
       setPhase(.idle)
-      if settings.followUpEnabled {
+      if liveMode || settings.followUpEnabled {
         await listenForFollowUp()
         return
       }
@@ -551,7 +568,7 @@ final class AssistantViewModel {
     DiagLog.log("state: → follow-up window")
     pauseWakeListening()
     followUpOpen = true
-    wakeStatus = "אפשר להמשיך לדבר בלי \"קלוד\"…"
+    wakeStatus = liveMode ? "🔴 לייב: פשוט תדבר" : "אפשר להמשיך לדבר בלי \"קלוד\"…"
     input.onPartial = { [weak self] text in self?.heardText = text }
     do {
       heardText = ""
@@ -563,7 +580,56 @@ final class AssistantViewModel {
       resumeWakeListening()
       return
     }
-    await finishOnSilence(maxSeconds: 10, minSpeechGap: 0.9)
+    if liveMode {
+      await finishOnSilence(maxSeconds: 120, minSpeechGap: 0.9, idleOverride: 115)
+      // Nothing said for two minutes in a row: keep the window open while live.
+      if liveMode, phase == .idle, !followUpOpen { await listenForFollowUp() }
+    } else {
+      await finishOnSilence(maxSeconds: 10, minSpeechGap: 0.9)
+    }
+  }
+
+  /// Visual questions get a fresh snapshot even when the preview is off.
+  static func needsVision(_ q: String) -> Bool {
+    let s = q.lowercased()
+    let keys = ["רואה", "רואים", "תראי", "תראה לי", "תסתכלי", "תסתכל", "מה זה", "מה זאת", "מה זו", "מה אני", "איזה ", "איזו ",
+                "תקראי", "תקרא", "מה כתוב", "תתרגמי", "תתרגם", "שלט", "תפריט", "אבן", "צבע", "מולי", "ביד שלי",
+                "what is this", "what's this", "look", "see", "read", "translate this"]
+    return keys.contains { s.contains($0) }
+  }
+
+  /// Start/stop Live mode (also used by the live_mode tool).
+  func setLiveMode(_ on: Bool, announce: Bool = true) async -> String {
+    if on {
+      guard await liveControl(true) else {
+        return "Couldn't start the camera — the session must be started and camera access allowed."
+      }
+      liveMode = true
+      liveLastActivity = Date()
+      DiagLog.log("live: ON")
+      liveWatchdog?.cancel()
+      liveWatchdog = Task { [weak self] in
+        while let self, !Task.isCancelled, self.liveMode {
+          try? await Task.sleep(for: .seconds(15))
+          if Date().timeIntervalSince(self.liveLastActivity) > 300 {
+            DiagLog.log("live: auto-off after 5 min idle")
+            _ = await self.setLiveMode(false)
+            SpeechOutput.shared.enqueue("סגרתי את מצב הלייב.")
+            return
+          }
+        }
+      }
+      return "Live mode is ON: the camera streams and every sentence Nave says goes to you with the current frame, no wake word. Say so in a few words."
+    } else {
+      guard liveMode else { return "Live mode was already off." }
+      liveMode = false
+      liveWatchdog?.cancel()
+      liveWatchdog = nil
+      _ = await liveControl(false)
+      DiagLog.log("live: OFF")
+      if announce { Chime.playClose() }
+      return "Live mode is OFF."
+    }
   }
 
   private func waitForSpeech() async {
